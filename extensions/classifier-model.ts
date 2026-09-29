@@ -136,8 +136,9 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 			}
 
 			try {
-				await ctx.reload();
 				ctx.ui.notify(`Classifier ${nextClassifier.enabled === false ? "disabled" : "updated"}.`, "info");
+				await ctx.reload();
+				return;
 			} catch (error) {
 				ctx.ui.notify(
 					`Classifier configuration saved, but Pi could not reload it. Run /reload. ${error instanceof Error ? error.message : String(error)}`,
