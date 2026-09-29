@@ -1,6 +1,6 @@
 # pi-bootstrap
 
-`pi-bootstrap` is a small, public bootstrap for Pi Coding Agent. It installs the core agent, a few convenience extensions, and two local extensions without choosing a provider or model for you.
+`pi-bootstrap` is a small, public bootstrap for one tested Pi Coding Agent ecosystem snapshot. It pins the Pi runtime and default extensions, installs no credentials, and never chooses a provider or model for the user.
 
 ## Quick install
 
@@ -10,7 +10,7 @@ Replace `<USER>` with the GitHub owner of this repository:
 curl -fsSL https://raw.githubusercontent.com/<USER>/pi-bootstrap/main/install.sh | bash
 ```
 
-For a reviewable install, clone the repository first:
+For a reviewable install:
 
 ```bash
 git clone https://github.com/<USER>/pi-bootstrap.git
@@ -19,23 +19,31 @@ less install.sh
 ./install.sh
 ```
 
-Pi extensions run with the user's permissions. Read the source and only install extensions you trust.
+Third-party Pi extensions run with the user's permissions. Read the source and install only extensions you trust.
+
+## Version policy
+
+This repository reproduces one tested ecosystem snapshot; it does not install whatever happens to be latest. Exact versions are kept in `install.sh` so the one-line installer remains self-contained. A newer upstream release is adopted only after the complete Pi plus extension combination passes compatibility checks. See [`TESTED_VERSIONS.md`](TESTED_VERSIONS.md) for the verification record.
+
+The stable Pi release is the anchor. `minimal-mode.ts` is always downloaded from the matching `earendil-works/pi` release tag, never from `main`. Default and optional extensions are checked against that Pi release before their pins are changed.
 
 ## What it installs
 
 ### Core
 
-- Pi Coding Agent: `@earendil-works/pi-coding-agent`
-- `@georgedong32/permission-modes`
+- Pi Coding Agent: `@earendil-works/pi-coding-agent@0.87.1`
+- `@georgedong32/permission-modes@2.7.0`
 - The local [`extensions/classifier-model.ts`](extensions/classifier-model.ts), which adds `/classifier-model`
 
 ### Default convenience extensions
 
-- `@narumitw/pi-btw` for `/btw` side questions
-- `pi-advisor-flow` for `/advisor`, `/advisor-models`, and `/advisor-settings`
-- The official Pi `minimal-mode.ts` example from `earendil-works/pi`
+- `@narumitw/pi-btw@0.61.1` for `/btw` side questions
+- `pi-advisor-flow@0.9.0` for `/advisor`, `/advisor-models`, and `/advisor-settings`
+- The official Pi `minimal-mode.ts` example from Pi `v0.87.1`
 
-The installer also merges `app.thinking.cycle = "ctrl+shift+tab"` into `~/.pi/agent/keybindings.json`. When tmux is installed, it adds `set -g extended-keys on` to `~/.tmux.conf` and reloads it for an active tmux session.
+The pinned source URL is `https://raw.githubusercontent.com/earendil-works/pi/v0.87.1/packages/coding-agent/examples/extensions/minimal-mode.ts`.
+
+The installer also merges `app.thinking.cycle = "ctrl+shift+tab"` into `~/.pi/agent/keybindings.json`.
 
 ## Model configuration
 
@@ -47,7 +55,7 @@ After configuring providers in Pi, use:
 /classifier-model
 ```
 
-to choose the `permission-modes` classifier from Pi's current available model registry. The command also offers **Disable classifier**, preserves existing classifier fields and permission rules, and keeps a previous model when disabling.
+to choose the `permission-modes` classifier from Pi's current available model registry. The command shows the current model, offers **Disable classifier**, preserves existing classifier fields and permission rules, and keeps a previous model when disabling.
 
 Use the command supplied by `pi-advisor-flow` to choose its models:
 
@@ -57,29 +65,39 @@ Use the command supplied by `pi-advisor-flow` to choose its models:
 
 The installer does not create `advisor.json`, choose an Executor, or choose an Advisor.
 
+## tmux compatibility
+
+The installer checks `tmux -V` numerically and never kills the tmux server:
+
+- tmux **3.5 or newer**: `set -g extended-keys on` and `set -g extended-keys-format csi-u`
+- tmux **3.2 through 3.4**: `set -g extended-keys on`
+- tmux **older than 3.2**: no extended-key configuration; upgrade tmux or run Pi outside tmux for modified Enter shortcuts
+
+Settings are maintained in a small idempotent block in `~/.tmux.conf`. If the installer is running inside tmux it attempts `tmux source-file`; a full server restart may still be needed for modified-key changes to be guaranteed active.
+
 ## Optional extensions
 
-These are intentionally not installed by the bootstrap:
+These are intentionally not installed by the bootstrap. No optional version is certified in this snapshot. After a monthly audit records an exact tested version, install it explicitly (replace `<TESTED_VERSION>`):
 
 ```bash
 # OpenAI/Codex service tier controls
-pi install npm:pi-openai-service-tier
+pi install npm:pi-openai-service-tier@<TESTED_VERSION>
 
 # Parallel and delegated agents
-pi install npm:pi-subagents
+pi install npm:pi-subagents@<TESTED_VERSION>
 
 # MCP server adapter
-pi install npm:pi-mcp-adapter
+pi install npm:pi-mcp-adapter@<TESTED_VERSION>
 
 # Language Server Protocol integration
-pi install npm:@narumitw/pi-lsp
+pi install npm:@narumitw/pi-lsp@<TESTED_VERSION>
 ```
 
-`pi-retry` is intentionally not installed. Current Pi includes provider retry and timeout handling, and the old extension is deprecated/superseded.
+`pi-retry` is intentionally not installed. Modern Pi includes provider retry and timeout handling; the old extension is deprecated and superseded.
 
 ## Files and safety
 
-The installer is idempotent. It creates `~/.pi/agent/extensions/` as needed, atomically merges JSON objects, keeps unrelated fields, and refuses to replace malformed JSON. It never edits `auth.json` or `models.json`, changes shell profiles, installs sudo packages, enables bypass mode, or installs the optional extensions above.
+The installer is idempotent. It creates `~/.pi/agent/extensions/` as needed, atomically merges JSON objects, keeps unrelated fields, and refuses to replace malformed JSON. It never edits `auth.json` or `models.json`, changes shell profiles, installs sudo packages, enables bypass mode, or installs optional extensions.
 
 The local extension writes only this file when the user selects a classifier:
 
@@ -87,25 +105,29 @@ The local extension writes only this file when the user selects a classifier:
 ~/.pi/agent/permission-modes.json
 ```
 
-It preserves existing `permissions`, classifier fields, and `timeoutMs`; a missing timeout defaults to 60000 ms. A successful change invokes Pi's supported `ctx.reload()` API. If reload is unavailable, the command saves the file and asks the user to run `/reload`.
+A missing classifier timeout defaults to 60000 ms; an existing `timeoutMs` is retained. Successful changes invoke Pi's supported `ctx.reload()` API. If reload fails, the command saves the file and asks the user to run `/reload`.
 
-## Upstream compatibility
+The embedded extension in `install.sh` is checked against the repository source with:
 
-The implementation follows the current `earendil-works/pi` coding-agent extension API: `ctx.modelRegistry.refresh()`, `ctx.modelRegistry.getAvailable()`, `ctx.ui.select()`, and command-context `ctx.reload()`. The official minimal mode source remains:
-
-```text
-packages/coding-agent/examples/extensions/minimal-mode.ts
+```bash
+scripts/check-embedded-extension.sh
 ```
 
-The package names used by the installer are the current names requested above. The bootstrap deliberately does not wrap or duplicate `pi-advisor-flow` model selection.
+## Upgrade policy
+
+Monthly maintenance starts by finding the newest stable Pi and stable releases of the default and optional extensions. It checks package metadata, peer dependencies, changelogs, Pi release documentation, and the exact Pi-bound files. If any core component is incompatible, the previous confirmed-good matrix remains in place. The maintenance instructions are in [`docs/monthly-maintenance-prompt.md`](docs/monthly-maintenance-prompt.md).
+
+## Upstream API verification
+
+The classifier extension uses Pi's current APIs for the pinned release: `pi.registerCommand`, `ctx.hasUI`, `ctx.modelRegistry.refresh()`, `ctx.modelRegistry.getAvailable()`, `ctx.ui.select()`, and command-context `ctx.reload()`.
 
 ## Testing
 
-Run the basic shell check locally:
-
 ```bash
 bash -n install.sh
-shellcheck install.sh   # optional
+shellcheck install.sh  # optional
+git diff --check
+scripts/check-embedded-extension.sh
 ```
 
-Run the installer twice to verify idempotence. A second run should retain existing keybindings and permission rules and keep exactly one tmux setting line.
+The monthly maintenance prompt also specifies isolated tests for malformed JSON, config merging, installer idempotence, pinned URLs, and tmux versions `3.1`, `3.2`, `3.3a`, `3.4`, `3.5`, `3.5a`, and `3.6`.

@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Tested version matrix. Keep this file self-contained for curl | bash installs.
+PI_VERSION="0.87.1"
+PERMISSION_MODES_VERSION="2.7.0"
+PI_BTW_VERSION="0.61.1"
+PI_ADVISOR_FLOW_VERSION="0.9.0"
+MINIMAL_MODE_URL="https://raw.githubusercontent.com/earendil-works/pi/v${PI_VERSION}/packages/coding-agent/examples/extensions/minimal-mode.ts"
+
 AGENT_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
 EXTENSIONS_DIR="$AGENT_DIR/extensions"
 KEYBINDINGS_FILE="$AGENT_DIR/keybindings.json"
 TMUX_CONFIG="${TMUX_CONFIG_FILE:-$HOME/.tmux.conf}"
-MINIMAL_MODE_URL="https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/examples/extensions/minimal-mode.ts"
 
 tmp_files=()
 cleanup() {
@@ -20,34 +26,33 @@ die() {
 	exit 1
 }
 
+warn() {
+	echo "pi-bootstrap: warning: $*" >&2
+}
+
 require_command() {
 	command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
-require_command node
-require_command npm
-require_command curl
-
-mkdir -p "$EXTENSIONS_DIR"
-
-echo "Installing Pi Coding Agent..."
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-
-# npm's global bin directory may not have been on PATH when this script started.
-PI_BIN="$(command -v pi || true)"
-if [[ -z "$PI_BIN" ]]; then
-	NPM_GLOBAL_BIN="$(npm prefix -g)/bin"
-	if [[ -x "$NPM_GLOBAL_BIN/pi" ]]; then
-		PI_BIN="$NPM_GLOBAL_BIN/pi"
-	else
-		die "Pi was installed but the pi command could not be found"
+# Return csi-u, extended, unsupported, or unknown. Accepts "3.5a" or "tmux 3.5a".
+tmux_strategy_for_version() {
+	local version="$1"
+	version="${version#tmux }"
+	if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+) ]]; then
+		echo "unknown"
+		return 0
 	fi
-fi
 
-echo "Installing default Pi extensions..."
-"$PI_BIN" install npm:@georgedong32/permission-modes
-"$PI_BIN" install npm:@narumitw/pi-btw
-"$PI_BIN" install npm:pi-advisor-flow
+	local major="${BASH_REMATCH[1]}"
+	local minor="${BASH_REMATCH[2]}"
+	if ((major > 3 || (major == 3 && minor >= 5))); then
+		echo "csi-u"
+	elif ((major == 3 && minor >= 2)); then
+		echo "extended"
+	else
+		echo "unsupported"
+	fi
+}
 
 install_classifier_extension() {
 	local local_source="${PI_BOOTSTRAP_SOURCE_DIR:-}"
@@ -60,7 +65,7 @@ install_classifier_extension() {
 		return
 	fi
 
-	# Keep the curl | bash path self-contained. Local checkouts use the source file above.
+	# Keep curl | bash self-contained. Local checkouts use the repository source file.
 	cat > "$EXTENSIONS_DIR/classifier-model.ts" <<'CLASSIFIER_MODEL_EXTENSION'
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -214,14 +219,6 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 CLASSIFIER_MODEL_EXTENSION
 }
 
-install_classifier_extension
-
-echo "Installing the official minimal-mode example..."
-minimal_tmp="$(mktemp)"
-tmp_files+=("$minimal_tmp")
-curl -fsSL "$MINIMAL_MODE_URL" -o "$minimal_tmp"
-install -m 0644 "$minimal_tmp" "$EXTENSIONS_DIR/minimal-mode.ts"
-
 merge_keybindings() {
 	node - "$KEYBINDINGS_FILE" <<'NODE'
 const fs = require("node:fs");
@@ -260,32 +257,146 @@ try {
 NODE
 }
 
+remove_managed_tmux_block() {
+	local file="$1"
+	if ! grep -Fq '# >>> pi-bootstrap >>>' "$file" || ! grep -Fq '# <<< pi-bootstrap <<<' "$file"; then
+		return
+	fi
+
+	local cleaned
+	cleaned="$(mktemp "${file}.tmp.XXXXXX")"
+	tmp_files+=("$cleaned")
+	awk '
+		/^# >>> pi-bootstrap >>>$/ { skip = 1; next }
+		$0 == "# <<< pi-bootstrap <<<" { skip = 0; next }
+		!skip { print }
+	' "$file" > "$cleaned"
+	chmod --reference="$file" "$cleaned" 2>/dev/null || true
+	mv "$cleaned" "$file"
+}
+
+configure_tmux() {
+	local version strategy
+	version="$(tmux -V 2>/dev/null || true)"
+	strategy="$(tmux_strategy_for_version "$version")"
+
+	case "$strategy" in
+		unsupported)
+			if [[ -f "$TMUX_CONFIG" ]]; then
+				remove_managed_tmux_block "$TMUX_CONFIG"
+			fi
+			warn "Pi modified-key support requires tmux >= 3.2. Upgrade tmux or run Pi outside tmux for modified Enter shortcuts."
+			return 0
+			;;
+		unknown)
+			warn "could not parse tmux version (${version:-unknown}); no tmux settings were changed."
+			return 0
+			;;
+	esac
+
+	mkdir -p "$(dirname "$TMUX_CONFIG")"
+	touch "$TMUX_CONFIG"
+	remove_managed_tmux_block "$TMUX_CONFIG"
+
+	local -a missing=()
+	if ! grep -Fqx 'set -g extended-keys on' "$TMUX_CONFIG"; then
+		missing+=('set -g extended-keys on')
+	fi
+	if [[ "$strategy" == "csi-u" ]] && ! grep -Fqx 'set -g extended-keys-format csi-u' "$TMUX_CONFIG"; then
+		missing+=('set -g extended-keys-format csi-u')
+	fi
+
+	if ((${#missing[@]})); then
+		{
+			printf '\n# >>> pi-bootstrap >>>\n'
+			printf '%s\n' "${missing[@]}"
+			printf '# <<< pi-bootstrap <<<\n'
+		} >> "$TMUX_CONFIG"
+	fi
+
+	case "$strategy" in
+		csi-u)
+			echo "tmux ${version#tmux } detected: extended-keys = on; extended-keys-format = csi-u"
+			;;
+		extended)
+			echo "tmux ${version#tmux } detected: extended-keys = on"
+			;;
+	esac
+
+	if [[ -n "${TMUX:-}" ]]; then
+		if ! tmux source-file "$TMUX_CONFIG"; then
+			warn "could not reload tmux configuration; run tmux source-file $TMUX_CONFIG or restart the tmux server."
+		fi
+	fi
+	echo "tmux configuration updated."
+	echo "For modified-key changes to be guaranteed active, restart the tmux server after saving your sessions."
+}
+
+main() {
+	require_command node
+require_command npm
+require_command curl
+
+mkdir -p "$EXTENSIONS_DIR"
+
+echo "Installing Pi Coding Agent ${PI_VERSION}..."
+npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
+
+# npm's global bin directory may not have been on PATH when this script started.
+PI_BIN="$(command -v pi || true)"
+if [[ -z "$PI_BIN" ]]; then
+	NPM_GLOBAL_BIN="$(npm prefix -g)/bin"
+	if [[ -x "$NPM_GLOBAL_BIN/pi" ]]; then
+		PI_BIN="$NPM_GLOBAL_BIN/pi"
+	else
+		die "Pi was installed but the pi command could not be found"
+	fi
+fi
+
+echo "Installing default Pi extensions..."
+"$PI_BIN" install "npm:@georgedong32/permission-modes@${PERMISSION_MODES_VERSION}"
+"$PI_BIN" install "npm:@narumitw/pi-btw@${PI_BTW_VERSION}"
+"$PI_BIN" install "npm:pi-advisor-flow@${PI_ADVISOR_FLOW_VERSION}"
+
+install_classifier_extension
+
+echo "Installing minimal-mode.ts from Pi v${PI_VERSION}..."
+minimal_tmp="$(mktemp)"
+tmp_files+=("$minimal_tmp")
+curl -fsSL "$MINIMAL_MODE_URL" -o "$minimal_tmp"
+install -m 0644 "$minimal_tmp" "$EXTENSIONS_DIR/minimal-mode.ts"
+
 echo "Merging Pi keybindings..."
 merge_keybindings
 
 if command -v tmux >/dev/null 2>&1; then
-	touch "$TMUX_CONFIG"
-	if ! grep -Fqx "set -g extended-keys on" "$TMUX_CONFIG"; then
-		printf '\n%s\n' "set -g extended-keys on" >> "$TMUX_CONFIG"
-	fi
-	if [[ -n "${TMUX:-}" ]]; then
-		tmux source-file "$TMUX_CONFIG" || echo "pi-bootstrap: could not reload tmux configuration; restart tmux or run tmux source-file $TMUX_CONFIG" >&2
-	fi
+	configure_tmux
 fi
 
-cat <<'EOF'
+cat <<EOF
 
 Pi bootstrap installed.
 
+Tested stack:
+  Pi:                ${PI_VERSION}
+  permission-modes:  ${PERMISSION_MODES_VERSION}
+  pi-btw:            ${PI_BTW_VERSION}
+  pi-advisor-flow:   ${PI_ADVISOR_FLOW_VERSION}
+
 Next steps:
 
-1. Configure your providers/models in Pi as usual.
+1. Configure your providers/models in Pi.
 2. Start Pi:
      pi
-3. Choose the permission classifier:
+3. Select the permission classifier:
      /classifier-model
-4. Choose Advisor models:
+4. Configure Advisor:
      /advisor-models
-5. Switch permission modes:
+5. Select a permission mode:
      /mode
 EOF
+}
+
+if [[ "${PI_BOOTSTRAP_TEST_ONLY:-0}" != 1 ]]; then
+	main "$@"
+fi
