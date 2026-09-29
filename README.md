@@ -1,6 +1,6 @@
 # pi-bootstrap
 
-`pi-bootstrap` is a small, public bootstrap for one tested Pi Coding Agent ecosystem snapshot. It pins the Pi runtime and default extensions, installs no credentials, and never chooses a provider or model for the user.
+`pi-bootstrap` is a small, public bootstrap for one version-pinned Pi Coding Agent ecosystem snapshot. It pins the Pi runtime and default extensions, installs no credentials, and never chooses a provider or model for the user.
 
 ## Quick install
 
@@ -23,7 +23,7 @@ Third-party Pi extensions run with the user's permissions. Read the source and i
 
 ## Version policy
 
-This repository reproduces one tested ecosystem snapshot; it does not install whatever happens to be latest. Exact versions are kept in `install.sh` so the one-line installer remains self-contained. A newer upstream release is adopted only after the complete Pi plus extension combination passes compatibility checks. See [`TESTED_VERSIONS.md`](TESTED_VERSIONS.md) for the verification record.
+This repository reproduces one pinned ecosystem snapshot; it does not install whatever happens to be latest. Exact versions are kept in `install.sh` so the one-line installer remains self-contained. A newer upstream release is adopted only after the complete Pi plus extension combination passes compatibility checks. See [`TESTED_VERSIONS.md`](TESTED_VERSIONS.md) for the verification record and the distinction between published, metadata-compatible, and runtime-tested releases.
 
 The stable Pi release is the anchor. `minimal-mode.ts` is always downloaded from the matching `earendil-works/pi` release tag, never from `main`. Default and optional extensions are checked against that Pi release before their pins are changed.
 

@@ -257,18 +257,15 @@ try {
 NODE
 }
 
-remove_managed_tmux_block() {
+remove_bootstrap_tmux_settings() {
 	local file="$1"
-	if ! grep -Fq '# >>> pi-bootstrap >>>' "$file" || ! grep -Fq '# <<< pi-bootstrap <<<' "$file"; then
-		return
-	fi
-
 	local cleaned
 	cleaned="$(mktemp "${file}.tmp.XXXXXX")"
 	tmp_files+=("$cleaned")
 	awk '
-		/^# >>> pi-bootstrap >>>$/ { skip = 1; next }
+		$0 == "# >>> pi-bootstrap >>>" { skip = 1; next }
 		$0 == "# <<< pi-bootstrap <<<" { skip = 0; next }
+		$0 == "set -g extended-keys on" { next } # Exact line added by the v1 installer.
 		!skip { print }
 	' "$file" > "$cleaned"
 	chmod --reference="$file" "$cleaned" 2>/dev/null || true
@@ -283,7 +280,7 @@ configure_tmux() {
 	case "$strategy" in
 		unsupported)
 			if [[ -f "$TMUX_CONFIG" ]]; then
-				remove_managed_tmux_block "$TMUX_CONFIG"
+				remove_bootstrap_tmux_settings "$TMUX_CONFIG"
 			fi
 			warn "Pi modified-key support requires tmux >= 3.2. Upgrade tmux or run Pi outside tmux for modified Enter shortcuts."
 			return 0
@@ -296,23 +293,18 @@ configure_tmux() {
 
 	mkdir -p "$(dirname "$TMUX_CONFIG")"
 	touch "$TMUX_CONFIG"
-	remove_managed_tmux_block "$TMUX_CONFIG"
-
-	local -a missing=()
-	if ! grep -Fqx 'set -g extended-keys on' "$TMUX_CONFIG"; then
-		missing+=('set -g extended-keys on')
+	remove_bootstrap_tmux_settings "$TMUX_CONFIG"
+	if [[ -s "$TMUX_CONFIG" && -n "$(tail -n 1 "$TMUX_CONFIG")" ]]; then
+		printf '\n' >> "$TMUX_CONFIG"
 	fi
-	if [[ "$strategy" == "csi-u" ]] && ! grep -Fqx 'set -g extended-keys-format csi-u' "$TMUX_CONFIG"; then
-		missing+=('set -g extended-keys-format csi-u')
-	fi
-
-	if ((${#missing[@]})); then
-		{
-			printf '\n# >>> pi-bootstrap >>>\n'
-			printf '%s\n' "${missing[@]}"
-			printf '# <<< pi-bootstrap <<<\n'
-		} >> "$TMUX_CONFIG"
-	fi
+	{
+		printf '# >>> pi-bootstrap >>>\n'
+		printf 'set -g extended-keys on\n'
+		if [[ "$strategy" == "csi-u" ]]; then
+			printf 'set -g extended-keys-format csi-u\n'
+		fi
+		printf '# <<< pi-bootstrap <<<\n'
+	} >> "$TMUX_CONFIG"
 
 	case "$strategy" in
 		csi-u)
@@ -377,7 +369,7 @@ cat <<EOF
 
 Pi bootstrap installed.
 
-Tested stack:
+Pinned stack:
   Pi:                ${PI_VERSION}
   permission-modes:  ${PERMISSION_MODES_VERSION}
   pi-btw:            ${PI_BTW_VERSION}
