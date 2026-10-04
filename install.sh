@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # Tested version matrix. Keep this file self-contained for curl | bash installs.
-PI_VERSION="0.87.1"
+PI_VERSION="1.0.2"
 PERMISSION_MODES_VERSION="2.7.0"
 PI_BTW_VERSION="0.61.1"
-PI_ADVISOR_FLOW_VERSION="0.9.0"
+PI_ADVISOR_FLOW_VERSION="0.11.0"
 MINIMAL_MODE_URL="https://raw.githubusercontent.com/earendil-works/pi/v${PI_VERSION}/packages/coding-agent/examples/extensions/minimal-mode.ts"
 
 AGENT_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
@@ -32,6 +32,20 @@ warn() {
 
 require_command() {
 	command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+require_node_version() {
+	local version major minor patch
+	version="$(node -p 'process.versions.node')"
+	if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+		die "could not parse Node.js version: ${version}"
+	fi
+	major="${BASH_REMATCH[1]}"
+	minor="${BASH_REMATCH[2]}"
+	patch="${BASH_REMATCH[3]}"
+	if ((major < 22 || (major == 22 && minor < 19))); then
+		die "Pi ${PI_VERSION} requires Node.js >=22.19.0; found ${major}.${minor}.${patch}"
+	fi
 }
 
 # Return csi-u, extended, unsupported, or unknown. Accepts "3.5a" or "tmux 3.5a".
@@ -329,6 +343,7 @@ main() {
 	require_command node
 require_command npm
 require_command curl
+require_node_version
 
 mkdir -p "$EXTENSIONS_DIR"
 

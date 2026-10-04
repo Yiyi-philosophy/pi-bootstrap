@@ -31,17 +31,19 @@ The stable Pi release is the anchor. `minimal-mode.ts` is always downloaded from
 
 ### Core
 
-- Pi Coding Agent: `@earendil-works/pi-coding-agent@0.87.1`
+- Pi Coding Agent: `@earendil-works/pi-coding-agent@1.0.2`
 - `@georgedong32/permission-modes@2.7.0`
 - The local [`extensions/classifier-model.ts`](extensions/classifier-model.ts), which adds `/classifier-model`
 
 ### Default convenience extensions
 
 - `@narumitw/pi-btw@0.61.1` for `/btw` side questions
-- `pi-advisor-flow@0.9.0` for `/advisor`, `/advisor-models`, and `/advisor-settings`
-- The official Pi `minimal-mode.ts` example from Pi `v0.87.1`
+- `pi-advisor-flow@0.11.0` for `/advisor`, `/advisor-models`, and `/advisor-settings`
+- The official Pi `minimal-mode.ts` example from Pi `v1.0.2`
 
-The pinned source URL is `https://raw.githubusercontent.com/earendil-works/pi/v0.87.1/packages/coding-agent/examples/extensions/minimal-mode.ts`.
+The pinned source URL is `https://raw.githubusercontent.com/earendil-works/pi/v1.0.2/packages/coding-agent/examples/extensions/minimal-mode.ts`.
+
+Pi `1.0.2` requires Node.js `>=22.19.0`.
 
 The installer also merges `app.thinking.cycle = "ctrl+shift+tab"` into `~/.pi/agent/keybindings.json`.
 
