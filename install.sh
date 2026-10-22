@@ -161,11 +161,13 @@ recover() {
 		rm -f "$SETTINGS_FILE"
 		echo "pi-bootstrap: removed $SETTINGS_FILE (it did not exist before this run)" >&2
 	fi
-	for entry in "${BACKED_UP_FILES[@]}"; do
+	# Guarded expansions keep `set -u` happy on bash < 4.4, where an empty
+	# array under "${a[@]}" is an unbound-variable error.
+	for entry in ${BACKED_UP_FILES[@]+"${BACKED_UP_FILES[@]}"}; do
 		cp -p "${entry#*|}" "${entry%%|*}" ||
 			echo "pi-bootstrap: could not restore ${entry%%|*} from ${entry#*|}" >&2
 	done
-	for entry in "${CREATED_FILES[@]}"; do
+	for entry in ${CREATED_FILES[@]+"${CREATED_FILES[@]}"}; do
 		rm -f "$entry"
 	done
 	echo "pi-bootstrap: package files may remain under $AGENT_DIR; Pi only loads packages listed in settings.json, so nothing partial is active." >&2

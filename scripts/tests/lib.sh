@@ -47,18 +47,9 @@ pass() {
 	printf 'PASS: %s\n' "$*"
 }
 
-skip() {
-	printf 'SKIP: %s\n' "$*"
-}
-
 assert_eq() {
 	local expected="$1" actual="$2" label="${3:-value}"
 	[[ "$expected" == "$actual" ]] || fail_test "$label: expected [$expected], got [$actual]"
-}
-
-assert_ne() {
-	local unexpected="$1" actual="$2" label="${3:-value}"
-	[[ "$unexpected" != "$actual" ]] || fail_test "$label: expected anything but [$unexpected]"
 }
 
 assert_contains() {
