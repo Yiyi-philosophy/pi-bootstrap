@@ -1,6 +1,6 @@
 # October 2026 upgrade audit — Pi 1.4.0 matrix
 
-Date: 2026-10-22 (UTC). Result: **PASS — recommended matrix adopted in this working tree.**
+Date: 2026-10-22 (UTC). Result: **PASS — recommended matrix adopted in commit `076f1c3`.** Engineering findings from an independent review of that commit are closed in [`r2-closure-report.md`](r2-closure-report.md); where the two disagree, R2 is current.
 
 Previous confirmed snapshot: commit `c327aaa8975bf9d0ae89112b113cf6fd244ffe49` (Pi 1.0.2 / permission-modes 2.7.0 / pi-btw 0.61.1 / pi-advisor-flow 0.11.0). The October 16 audit (`/tmp/pi-oct2026-audit/REPORT.md`) rejected Pi 1.3.0 because published permission-modes 2.7.0 ignored authentication-resolved custom `baseUrl`. This audit re-ran that reproduction and verified the fix.
 
@@ -27,14 +27,14 @@ npm facts checked on 2026-10-22: `@earendil-works/pi-coding-agent` dist-tags `la
 
 ## Classifier regression: reproduction and fix (HTTP-level evidence)
 
-Harness: `/tmp/pi-oct2026-upgrade/bin/classifier-baseurl-regression.mjs` — one real Pi 1.4.0 `ModelRegistry` (via `ModelRuntime.create`) with a native provider whose `ApiKeyAuth.resolve()` returns a per-credential `baseUrl` (the documented credential-dependent routing case, pi-ai `auth/types.ts`), and a local HTTP mock whose only valid route is the resolved URL.
+Harness: now committed as `scripts/tests/test-classifier-baseurl.mjs` (originally `/tmp/pi-oct2026-upgrade/bin/classifier-baseurl-regression.mjs`) — one real Pi 1.4.0 `ModelRegistry` (via `ModelRuntime.create`) with a native provider whose `ApiKeyAuth.resolve()` returns a per-credential `baseUrl` (the documented credential-dependent routing case, pi-ai `auth/types.ts`), and a local HTTP mock whose only valid route is the resolved URL.
 
 1. Sanity: `find()` returns the model with catalog `baseUrl` B; `getApiKeyAndHeaders()` returns `{ok, apiKey, baseUrl: A}` with A ≠ B (divergence active).
 2. **2.7.0 (published npm, unmodified): FAILS** — the classifier posts to B, the mock tripwire answers 400 `Classifier ignored resolved auth.baseUrl`, the call errors. Regression deterministically reproduced.
 3. **2.8.0 (snapshot cf77816): PASSES** — `registry.complete()` routes through `ModelRuntime.prepareRequest`, which applies `resolution.auth.baseUrl` over the model; requests land on A with the `Authorization` header, correct `classify_result` tool schema and forced tool choice, and valid allow/deny verdicts.
 4. Faults (malformed SSE JSON, empty stream, timeout): no silent allow; exactly one HTTP attempt per call (no stacked SDK retries — `maxRetries: 0`).
 
-Extension-gate evidence (real Pi 1.4.0 loader, `/tmp/pi-oct2026-upgrade/bin/extension-gate-test.mjs`): classifier unavailable → fail-closed block with exactly 3 attempts; classifier deny blocks / allow passes; B1 `then_run` embedded commands surface in ask prompts and are blocked in plan; `powershell` runs the bash tier ladder; unknown tools without command fields keep their characterized passthrough; outside-cwd writes gated; `/classifier-model` persists and reloads.
+Extension-gate evidence (real Pi 1.4.0 loader; committed as `scripts/tests/test-permission-gate.mjs`, originally `/tmp/pi-oct2026-upgrade/bin/extension-gate-test.mjs`): classifier unavailable → fail-closed block with exactly 3 attempts; classifier deny blocks / allow passes; B1 `then_run` embedded commands surface in ask prompts and are blocked in plan; `powershell` runs the bash tier ladder; unknown tools without command fields keep their characterized passthrough; outside-cwd writes gated; `/classifier-model` persists and reloads.
 
 ## Upstream issues and PR
 
@@ -51,18 +51,20 @@ Extension-gate evidence (real Pi 1.4.0 loader, `/tmp/pi-oct2026-upgrade/bin/exte
 
 Typecheck: `tsc --noEmit` with devDependencies pinned to Pi 1.4.0 — production sources clean; the 7 errors are confined to upstream's own test files (fake-pi surface drift between Pi 0.85.1 and 1.4.0). Log: `/tmp/pi-oct2026-upgrade/evidence/typecheck-pi140.log`.
 
-## Isolated integration tests (all under `/tmp/pi-oct2026-upgrade`)
+## Isolated integration tests
 
-- Node 24.14.0 / npm 11.9.0; `bash -n install.sh` PASS; `git diff --check` PASS; shellcheck not installed (SKIP — no system packages were installed to obtain it); `scripts/check-embedded-extension.sh` PASS; tmux suite (`scripts/test-tmux.sh`) PASS for 3.1/3.2/3.4/3.5/3.5a/3.6 incl. migration + idempotence; no tmux server was contacted.
+The 2026-10 audit ran these in an ephemeral workspace (`/tmp/pi-oct2026-upgrade`). They are now committed under `scripts/tests/` and runnable with `scripts/tests/run-all.sh`; the list below records what that audit observed, and [`r2-closure-report.md`](r2-closure-report.md) records the committed results.
+
+- Node 24.14.0 / npm 11.9.0; `bash -n install.sh` PASS; `git diff --check` PASS; shellcheck not installed (SKIP — no system packages were installed to obtain it); `scripts/check-embedded-extension.sh` PASS; tmux suite (`scripts/test-tmux.sh`) PASS for 3.1/3.2/3.4/3.5/3.5a/3.6 incl. migration + idempotence; no tmux server was contacted. **R2 note:** this run did not include 3.3a even though the docs listed it; the committed suite now covers 3.1/3.2/3.3a/3.4/3.5/3.5a/3.6.
 - Fresh-home installer run + repeat: byte-identical `.pi/agent` state (excluding `.git`), stable `settings.json` (exactly the three pinned sources), no `auth.json`, `models.json`, or `advisor.json` created; keybinding merge correct; minimal-mode.ts SHA256 matches the v1.4.0 tag pin; classifier-model.ts byte-identical to the repository source.
 - Upgrade-path run (old 1.0.2 baseline seeded exactly, plus an unmanaged package entry and a user `permission-modes.json`): stale `npm:…permission-modes@2.7.0`, `pi-btw@0.61.1`, `pi-advisor-flow@0.11.0` entries removed via `pi remove` (two installer bugs found and fixed during the audit: an illegal top-level `return` in the removal helper's node script, and a filter string that matched the git repo name but not the npm package name); unmanaged entry and user config preserved; verified 2.8.0 ends up as the only permission-modes source. `pi remove` leaves the old npm package's files on disk (unreferenced; harmless).
 - Tamper tests: modified tracked file → `verify_permission_modes` dies ("working tree has local modifications"); missing tracked file → dies; the SHA256 manifest provides defense-in-depth independent of git status.
 - RPC startup on the installed CLI: all default commands registered, invocations succeed, `/btw` correctly requires TUI. TUI (pty): all five extensions load together; `/classifier-model`, `/advisor-models`, `/mode` open and cancel; `/btw` streams a real answer from the loopback fixture; `/advisor` completes a full `ask_advisor` consultation (executor model distinct from advisor model — same-model guard verified separately), and an uncredentialed advisor yields a clean error, not a crash.
 - Advisor persistence: `advisor.json` is created only through explicit selector interaction; blind-Enter defaults are user-visible and user-fixable.
-- classifier JSON-safety battery (merge, disable w/ retained model, timeout preservation, permission-rule preservation, invalid/non-object JSON refusal, cancellation, cached-registry fallback, no-UI guard, reload-failure fallback, atomic-rename-failure cleanup) — ALL PASS on the installer-produced environment.
-- Optional plugins: load smoke on the installed Pi 1.4.0 (see TESTED_VERSIONS.md). Note: `PI_OFFLINE=1` silently prevents `-e npm:` package installation — early "loads" results without it were invalid and were discarded and re-run.
+- classifier JSON-safety battery, now `scripts/tests/test-classifier-config.mjs` (merge, disable w/ retained model, timeout preservation, permission-rule preservation, invalid/non-object JSON refusal, cancellation, cached-registry fallback, no-UI guard, reload-failure fallback, atomic-rename-failure cleanup) — ALL PASS on the installer-produced environment.
+- Optional plugins: load smoke on the installed Pi 1.4.0 (see TESTED_VERSIONS.md). Note: `PI_OFFLINE=1` silently prevents `-e npm:` package installation — early "loads" results without it were invalid and were discarded and re-run. The ad-hoc smoke script was not reproducible enough to commit, so these remain TESTED (load) only, with the caveat recorded in TESTED_VERSIONS.md.
 
-### UNVERIFIED (explicitly)
+### UNVERIFIED (explicitly, unchanged by R2)
 
 - Real interactive multi-turn sessions with real provider credentials (no credentials were used; all model traffic was loopback fixtures).
 - Actual modified-key forwarding through each tmux release (stubbed version branches only, as in prior audits).
@@ -79,7 +81,7 @@ pi remove "git:github.com/GeorgeDong32/pi-permission-modes@cf77816f28e102409dddb
 
 # 2. Run the previous installer (old pins: Pi 1.0.2, permission-modes 2.7.0 npm,
 #    pi-btw 0.61.1, pi-advisor-flow 0.11.0, minimal-mode v1.0.2)
-git clone https://github.com/<USER>/pi-bootstrap.git
+git clone https://github.com/Yiyi-philosophy/pi-bootstrap.git
 cd pi-bootstrap
 git checkout c327aaa8975bf9d0ae89112b113cf6fd244ffe49
 ./install.sh
@@ -87,14 +89,14 @@ git checkout c327aaa8975bf9d0ae89112b113cf6fd244ffe49
 
 User files (`permission-modes.json`, `advisor.json`, `auth.json`, `models.json`) are not touched by either direction; the 2.7.0/2.8.0 classifier config fields are the same shape, so a configured classifier model survives rollback.
 
-## Evidence index
+## Evidence index (2026-10 audit run; `/tmp` copies are not durable)
 
-- `evidence/classifier-baseurl-regression.json` — full request/verdict records for 2.7.0 (fail) and 2.8.0 (pass).
-- `evidence/permission-modes-2.8.0-cf77816.SHA256SUMS` — the 69-file manifest (embedded in `install.sh`).
-- `evidence/extension-gate-test.json`, `bin/extension-gate-test.mjs` — real-loader gate battery.
+- `scripts/tests/test-classifier-baseurl.mjs` — committed reproduction (2.7.0 fail, 2.8.0 pass) with the request/verdict assertions that used to live in `evidence/classifier-baseurl-regression.json`.
+- The 69-file manifest is embedded in `install.sh` and generated only by `scripts/update-permission-modes-pin.sh`, which re-verifies the checkout first; the old `evidence/permission-modes-2.8.0-cf77816.SHA256SUMS` copy is superseded.
+- `scripts/tests/test-permission-gate.mjs` — the committed real-loader gate battery.
 - `evidence/typecheck-pi140.log` — tsc output against Pi 1.4.0 types.
 - `evidence/rpc-stdout.jsonl`, `evidence/rpc-stderr.log` — RPC startup records.
 - `evidence/tui-output.log`, `evidence/advisor-consult-output.log`, `evidence/advisor-consult-requests.json` — pty sessions.
-- `evidence/install-first.log`, `install-second.log`, `install-third.log`, `upgrade-run.log`, `upgrade-run2.log`, `inst-snapshot-*.txt` — installer runs.
+- `scripts/tests/test-install-run.sh`, `scripts/tests/test-install-settings.sh` — the committed installer coverage that replaced the ad-hoc `install-*.log` / `upgrade-run*.log` transcripts.
 - `evidence/issue3-summary.md`, `evidence/issue3-repro.log` — issue #3 reproduction.
 - `evidence/optional-smoke.json` — optional plugin results.

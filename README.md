@@ -4,16 +4,14 @@
 
 ## Quick install
 
-Replace `<USER>` with the GitHub owner of this repository:
-
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<USER>/pi-bootstrap/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Yiyi-philosophy/pi-bootstrap/main/install.sh | bash
 ```
 
 For a reviewable install:
 
 ```bash
-git clone https://github.com/<USER>/pi-bootstrap.git
+git clone https://github.com/Yiyi-philosophy/pi-bootstrap.git
 cd pi-bootstrap
 less install.sh
 ./install.sh
@@ -52,6 +50,15 @@ The pinned source URL is `https://raw.githubusercontent.com/earendil-works/pi/v1
 Pi `1.4.0` requires Node.js `>=22.19.0`.
 
 The installer also merges `app.thinking.cycle = "ctrl+shift+tab"` into `~/.pi/agent/keybindings.json`.
+
+## How the install is protected
+
+1. **Preflight.** Required commands, Node.js version, `HOME`, and `settings.json` are checked before anything changes. An unreadable, non-object, or ambiguous `packages` array stops the install with an explanation and no writes.
+2. **Pre-install source verification.** The pinned permission-modes commit is fetched into a temporary staging repository and checked for the exact commit, the exact git tree, a clean working tree, and all 69 file checksums *before* Pi is asked to install it.
+3. **No lifecycle scripts.** Pi's git install would otherwise run the package's `npm install` with `preinstall`/`install`/`postinstall`/`prepare` enabled and offers no flag to disable them (verified against Pi 1.4.0 with a probe package; see [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md)). The installer exports `npm_config_ignore_scripts=1` for managed installs. Both npm packages and the pinned source ship prebuilt files, so nothing is lost.
+4. **Exact migration.** Stale entries for the three managed packages are identified by Pi's own package identity (npm package name; git host and path without the ref), never by substring. Unrelated packages, local paths, and look-alike names are left alone. Entries carrying extra keys are reported as conflicts instead of being rewritten.
+5. **Post-install verification.** The installed checkout is re-verified (commit, tree, clean tree, 69 checksums), and `settings.json` must list exactly the pinned sources; `pi install` can otherwise exit 0 after silently failing to persist.
+6. **Rollback.** A failure after the first change restores `settings.json` and any replaced extension files, so no half-activated matrix remains.
 
 ## Model configuration
 
@@ -102,7 +109,15 @@ pi install npm:@narumitw/pi-lsp@<TESTED_VERSION>
 
 ## Files and safety
 
-The installer is idempotent. It creates `~/.pi/agent/extensions/` as needed, atomically merges JSON objects, keeps unrelated fields, and refuses to replace malformed JSON. It never edits `auth.json` or `models.json`, changes shell profiles, installs sudo packages, enables bypass mode, or installs optional extensions.
+The installer is idempotent. It creates `~/.pi/agent/extensions/` as needed, atomically merges JSON objects, keeps unrelated fields, and refuses to replace malformed JSON. It never edits `auth.json` or `models.json`, changes shell profiles, installs sudo packages, enables bypass mode, or installs optional extensions. `npm install -g` for Pi itself uses `--ignore-scripts`.
+
+It writes only inside `~/.pi/agent`:
+
+- `settings.json` (managed package entries, via `pi install` / `pi remove`)
+- `extensions/classifier-model.ts`, `extensions/minimal-mode.ts`
+- `keybindings.json` (one key)
+- `git/…` and `npm/…` (Pi's own package storage)
+- `.pi-bootstrap/` (this run's `settings.json` snapshot and restored-file backups)
 
 The local extension writes only this file when the user selects a classifier:
 
@@ -120,7 +135,7 @@ scripts/check-embedded-extension.sh
 
 ## Upgrade policy
 
-Monthly maintenance starts by finding the newest stable Pi and stable releases of the default and optional extensions. It checks package metadata, peer dependencies, changelogs, Pi release documentation, and the exact Pi-bound files. If any core component is incompatible, the previous confirmed-good matrix remains in place. The maintenance instructions are in [`docs/monthly-maintenance-prompt.md`](docs/monthly-maintenance-prompt.md); the 2026-10 upgrade evidence is in [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md) and [`docs/upgrade-risk-review.md`](docs/upgrade-risk-review.md).
+Monthly maintenance starts by finding the newest stable Pi and stable releases of the default and optional extensions. It checks package metadata, peer dependencies, changelogs, Pi release documentation, and the exact Pi-bound files. If any core component is incompatible, the previous confirmed-good matrix remains in place. The maintenance instructions are in [`docs/monthly-maintenance-prompt.md`](docs/monthly-maintenance-prompt.md); the 2026-10 upgrade evidence is in [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md) and [`docs/upgrade-risk-review.md`](docs/upgrade-risk-review.md); the R2 engineering closure is in [`docs/r2-closure-report.md`](docs/r2-closure-report.md).
 
 ## Upstream API verification
 
@@ -129,11 +144,23 @@ The classifier extension uses Pi's current APIs for the pinned release: `pi.regi
 ## Testing
 
 ```bash
-bash -n install.sh
-shellcheck install.sh  # optional
-git diff --check
-scripts/check-embedded-extension.sh
-scripts/test-tmux.sh
+scripts/tests/run-all.sh           # everything available offline
+scripts/tests/run-all.sh --fetch   # also download test fixtures
 ```
 
-The monthly maintenance prompt also specifies isolated tests for malformed JSON, config merging, installer idempotence, upgrade-path transitions, pinned URLs and checksums, the permission-modes SHA256 manifest, and tmux versions `3.1`, `3.2`, `3.3a`, `3.4`, `3.5`, `3.5a`, and `3.6`.
+Each test runs with its own scratch `HOME`, stubbed `pi`/`npm`/`curl`/`tmux`, and loopback mock servers; none reads the real `~/.pi`, and none needs a credential. Tests that cannot run report `SKIP`, never a false `PASS`.
+
+| Suite | Covers |
+|---|---|
+| `scripts/tests/test-install-settings.sh` | stale-entry detection: string/object entries, npm→git, version bumps, unrelated packages, malformed settings, `pi remove` failure |
+| `scripts/tests/test-install-run.sh` | fresh install, repeat install, upgrade from 1.0.2, pre-install/pinned-source verification, tamper detection, rollback |
+| `scripts/tests/test-install-lifecycle.mjs` | real Pi git install with and without `npm_config_ignore_scripts` |
+| `scripts/tests/test-classifier-config.mjs` | `/classifier-model` merge, disable, timeout, invalid JSON, atomic write, reload failure |
+| `scripts/tests/test-permission-gate.mjs` | fail-closed, bounded retries, allow/deny, embedded commands, powershell, outside-cwd |
+| `scripts/tests/test-classifier-baseurl.mjs` | 2.7.0 misroutes / 2.8.0 honors the auth-resolved `baseUrl` (real `ModelRegistry`) |
+| `scripts/tests/test-rpc-smoke.mjs` | headless Pi start plus command registration and invocation |
+| `scripts/tests/test-default-stack.mjs` | all five default extensions on one real loader |
+| `scripts/test-tmux.sh` | tmux `3.1`, `3.2`, `3.3a`, `3.4`, `3.5`, `3.5a`, `3.6`, downgrade, no-trailing-newline, reload failure |
+| `scripts/check-embedded-extension.sh` | embedded `classifier-model.ts` is byte-identical to the repository source |
+
+The real-runtime tests need Pi 1.4.0 and the pinned permission-modes source; set `PI_BOOTSTRAP_PI_PACKAGE` and `PI_BOOTSTRAP_PM_280` (or `PI_BOOTSTRAP_AGENT_DIR`) to point at them, or the suite reports those as skipped.

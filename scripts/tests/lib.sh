@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# Shared helpers for the pi-bootstrap test suite.
+#
+# Every test runs in an isolated HOME with stubbed external commands. Nothing
+# here reads or writes the developer's real ~/.pi, and no test needs a
+# credential: fixtures use empty or absent auth.json files and loopback mock
+# servers only.
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+tests_dir="$repo_dir/scripts/tests"
+fixtures_dir="$tests_dir/fixtures"
+
+# Create a scratch root: bin/ (stubs), home/ (isolated HOME), work/ (cwd).
+new_root() {
+	local root
+	root="$(mktemp -d "${TMPDIR:-/tmp}/pi-bootstrap-test.XXXXXX")"
+	mkdir -p "$root/bin" "$root/home" "$root/work" "$root/npm-prefix" "$root/npm-cache"
+	printf '%s\n' "$root"
+}
+
+# export_isolated_env ROOT -- point everything the installer and Pi honor at ROOT.
+export_isolated_env() {
+	local root="$1"
+	export HOME="$root/home"
+	export PI_CODING_AGENT_DIR="$root/home/.pi/agent"
+	unset PI_AGENT_DIR PI_BOOTSTRAP_SOURCE_DIR PI_BIN TMUX || true
+	export TMUX_CONFIG_FILE="$root/home/.tmux.conf"
+	export npm_config_prefix="$root/npm-prefix"
+	export npm_config_cache="$root/npm-cache"
+	export FAKE_NPM_LOG="$root/npm.log"
+	export FAKE_PI_LOG="$root/pi.log"
+	export FAKE_PI_JS="$fixtures_dir/fake-pi.js"
+	export PATH="$root/bin:$PATH"
+	mkdir -p "$PI_CODING_AGENT_DIR"
+	: >"$FAKE_NPM_LOG"
+	: >"$FAKE_PI_LOG"
+}
+
+fail_test() {
+	printf 'FAIL: %s\n' "$*" >&2
+	exit 1
+}
+
+pass() {
+	printf 'PASS: %s\n' "$*"
+}
+
+skip() {
+	printf 'SKIP: %s\n' "$*"
+}
+
+assert_eq() {
+	local expected="$1" actual="$2" label="${3:-value}"
+	[[ "$expected" == "$actual" ]] || fail_test "$label: expected [$expected], got [$actual]"
+}
+
+assert_ne() {
+	local unexpected="$1" actual="$2" label="${3:-value}"
+	[[ "$unexpected" != "$actual" ]] || fail_test "$label: expected anything but [$unexpected]"
+}
+
+assert_contains() {
+	local haystack="$1" needle="$2" label="${3:-output}"
+	case "$haystack" in
+		*"$needle"*) ;;
+		*) fail_test "$label: expected to contain [$needle]; got [$haystack]" ;;
+	esac
+}
+
+assert_not_contains() {
+	local haystack="$1" needle="$2" label="${3:-output}"
+	case "$haystack" in
+		*"$needle"*) fail_test "$label: expected NOT to contain [$needle]; got [$haystack]" ;;
+		*) ;;
+	esac
+}
+
+# Source the installer's functions without running main().
+load_installer() {
+	PI_BOOTSTRAP_TEST_ONLY=1 source "$repo_dir/install.sh"
+}
+
+# Install a shell fixture stub under a different command name. The copy keeps
+# the fixture directory baked in, so moving it out of the way is safe.
+put_stub_as() {
+	local root="$1" fixture="$2" name="$3"
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'PI_BOOTSTRAP_FIXTURES=%q\n' "$fixtures_dir"
+		printf 'export PI_BOOTSTRAP_FIXTURES\n'
+		tail -n +2 "$fixtures_dir/$fixture.sh"
+	} >"$root/bin/$name"
+	chmod +x "$root/bin/$name"
+}
+
+# put_stub ROOT NAME -- install fixtures/<NAME>.sh as ROOT/bin/<NAME>.
+put_stub() {
+	local root="$1" name="$2"
+	local target="${3:-$name}"
+	put_stub_as "$root" "$name" "$target"
+}
+
+# Install the fake `pi`, `npm`, `curl`, and `tmux` used by installer tests.
+install_stubs() {
+	local root="$1"
+	{
+		printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+		printf 'exec node %q "$@"\n' "$fixtures_dir/fake-pi.js"
+	} >"$root/bin/pi"
+	chmod +x "$root/bin/pi"
+	put_stub "$root" fake-npm npm
+	put_stub "$root" fake-curl curl
+	put_stub "$root" fake-tmux tmux
+}
+
+# Create a small git repository to stand in for the pinned upstream source.
+# Prints the commit, then the tree hash, and writes the manifest to $2.
+make_fixture_repo() {
+	local dir="$1" manifest_out="$2"
+	mkdir -p "$dir/sub"
+	printf 'export const index = 1;\n' >"$dir/index.ts"
+	printf 'export const helper = 2;\n' >"$dir/sub/helper.ts"
+	printf '{"name":"fixture-package","version":"1.0.0"}\n' >"$dir/package.json"
+	git -C "$dir" init --quiet
+	git -C "$dir" -c user.email=test@example.invalid -c user.name=test add -A
+	git -C "$dir" -c user.email=test@example.invalid -c user.name=test commit --quiet -m fixture
+	manifest_of "$dir" >"$manifest_out"
+	git -C "$dir" rev-parse HEAD
+	git -C "$dir" rev-parse 'HEAD^{tree}'
+}
+
+# Print "<sha256>  <relative path>" lines for a git directory, sorted by path.
+manifest_of() {
+	local dir="$1" rel
+	(
+		cd "$dir"
+		git ls-files -z | LC_ALL=C sort -z |
+			while IFS= read -r -d '' rel; do
+				printf '%s  %s\n' "$(sha256sum "$rel" | cut -d' ' -f1)" "$rel"
+			done
+	)
+}
+
+# Print the `packages` array of settings.json as one source string per line.
+package_sources() {
+	local file="$1"
+	node - "$file" <<'NODE'
+const fs = require("node:fs");
+const file = process.argv[2];
+if (!fs.existsSync(file)) process.exit(0);
+const config = JSON.parse(fs.readFileSync(file, "utf8"));
+for (const entry of config.packages ?? []) {
+	console.log(typeof entry === "string" ? entry : JSON.stringify(entry));
+}
+NODE
+}
+
+# Count package entries in settings.json.
+package_count() {
+	local file="$1"
+	node - "$file" <<'NODE'
+const fs = require("node:fs");
+const file = process.argv[2];
+if (!fs.existsSync(file)) { console.log(0); process.exit(0); }
+const config = JSON.parse(fs.readFileSync(file, "utf8"));
+console.log(Array.isArray(config.packages) ? config.packages.length : 0);
+NODE
+}
