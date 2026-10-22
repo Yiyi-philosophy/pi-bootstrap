@@ -138,6 +138,15 @@ The PASS recorded before the final refactor was not treated as acceptance; this 
 - **TUI, multi-turn sessions, and real credentials**: UNVERIFIED, unchanged from the 2026-10 audit.
 - **Install-time dependency resolution** (F2 residual) is not sandboxed; see F2.
 
+## Local commits
+
+| Commit | Contents |
+|---|---|
+| `0e92857` | installer hardening (F1/F2/F3), committed test suite (F4/F5), documentation accuracy (F6), pin helper (F7) |
+| `93b7f03` | bash <4.4 empty-array guard in `recover()`, one shared settings-plan parser, unused test helpers removed |
+
+Both are local on `r2-review-fixes`; nothing was pushed, merged, or tagged.
+
 ## Final verdict
 
 **PASS.** F1, F3, F4, F5, F6 FIXED; F2 FIXED with a documented residual; F7 PARTIAL by deliberate choice (kept the per-file manifest, automated its generation, added a test for the helper). No version pins changed, no push, merge, tag, or production Pi configuration touched.
