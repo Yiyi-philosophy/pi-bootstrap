@@ -49,7 +49,7 @@ printf 'export default function minimalMode() {}\n' >"$root/minimal-mode.ts"
 export FAKE_CURL_FILE="$root/minimal-mode.ts"
 minimal_sha="$(sha256sum "$root/minimal-mode.ts" | cut -d' ' -f1)"
 
-# The installer assigns its pinned constants at file scope when it is sourced,
+
 # which would overwrite environment overrides. The case runner therefore applies
 # them *after* sourcing, through PI_BOOTSTRAP_TEST_SETUP (see run_installer).
 fixture_setup="$(cat <<SETUP
@@ -263,6 +263,36 @@ run_case_without() {
 	[[ ! -e "$remove_path" ]] || fail_test "$label: $remove_path did not exist before the run and was not removed"
 	pass "$label: a config file created by the failed run was removed again"
 }
+
+# --- a fresh machine: no previous Pi, no previous packages ---------------
+# H1 also covers the first-install case: a failure must not leave a Pi the user
+# never had, nor package trees, nor extensions.
+fresh_home="$root/fresh-home"
+fresh_agent="$fresh_home/.pi/agent"
+mkdir -p "$fresh_agent" "$root/fresh-prefix"
+printf '{"packages":[]}\n' >"$fresh_agent/settings.json"
+if env PI_BOOTSTRAP_TEST_ONLY=1 PI_BOOTSTRAP_ALLOW_UNVERIFIED=1 \
+	PI_BOOTSTRAP_TEST_SETUP="$fixture_setup" PI_BOOTSTRAP_TEST_FAIL_AT=after-config \
+	PI_CODING_AGENT_DIR="$fresh_agent" HOME="$fresh_home" TMUX_CONFIG_FILE="$fresh_home/.tmux.conf" \
+	npm_config_prefix="$root/fresh-prefix" npm_config_cache="$root/npm-cache" \
+	PATH="$root/bin:$PATH" \
+	bash -c 'source "$1"; eval "${PI_BOOTSTRAP_TEST_SETUP:-}"; main' _ "$repo_dir/install.sh" \
+	>"$root/fresh.log" 2>&1; then
+	fail_test "fresh failure: installer reported success"
+fi
+assert_contains "$(cat "$root/fresh.log")" "rolling back" "fresh failure: rollback announced"
+[[ ! -e "$root/fresh-prefix/lib/node_modules/@earendil-works/pi-coding-agent" ]] ||
+	fail_test "fresh failure: the Pi package installed by the failed run was left behind"
+[[ ! -e "$root/fresh-prefix/bin/pi" ]] || fail_test "fresh failure: the pi bin entry was left behind"
+[[ ! -e "$fresh_agent/npm" ]] || fail_test "fresh failure: the npm tree created by the failed run was left behind"
+[[ ! -e "$fresh_agent/git" ]] || fail_test "fresh failure: the git tree created by the failed run was left behind"
+[[ ! -e "$fresh_agent/extensions/classifier-model.ts" ]] ||
+	fail_test "fresh failure: an extension created by the failed run was left behind"
+[[ ! -e "$fresh_agent/keybindings.json" ]] || fail_test "fresh failure: a keybindings file was left behind"
+[[ ! -e "$fresh_home/.tmux.conf" ]] || fail_test "fresh failure: a tmux config was left behind"
+assert_eq '{"packages":[]}' "$(tr -d '\n' <"$fresh_agent/settings.json")" "fresh failure: settings.json is back to its original bytes"
+[[ ! -d "$fresh_agent/.pi-bootstrap/backup" ]] || fail_test "fresh failure: backups were left behind"
+pass "fresh machine: a failed first install leaves nothing behind (no Pi, no packages, no extensions)"
 
 # --- M4: keybindings/tmux that did not exist before ----------------------
 run_case_without "failure with no pre-existing keybindings" "$agent/keybindings.json" 0 after-keybindings

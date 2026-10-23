@@ -656,6 +656,20 @@ resolve_global_paths() {
 	GLOBAL_PI_BIN="$GLOBAL_NPM_PREFIX/bin/pi"
 }
 
+# The activation step moves the old Pi package aside, so the global prefix must
+# be writable by this user. Check that before any backup is taken: a root-owned
+# npm prefix would otherwise fail halfway through with a confusing message.
+require_writable_global_prefix() {
+	local package_parent bin_dir
+	package_parent="$(dirname "$GLOBAL_PI_PACKAGE")"
+	bin_dir="$GLOBAL_NPM_PREFIX/bin"
+	[[ -d "$package_parent" ]] || mkdir -p "$package_parent" 2>/dev/null || true
+	[[ -d "$bin_dir" ]] || mkdir -p "$bin_dir" 2>/dev/null || true
+	for dir in "$package_parent" "$bin_dir"; do
+		[[ -w "$dir" ]] || fail "the npm global directory $dir is not writable by this user; run the installer with the same privileges used to install Pi (for example a user-owned prefix via \`npm config set prefix\`)"
+	done
+}
+
 read_package_version() {
 	local manifest="$1"
 	node -e 'try { const m = require(process.argv[1]); process.stdout.write(String(m.version || "")); } catch { process.exit(1); }' "$manifest" 2>/dev/null
@@ -688,10 +702,17 @@ install_pi_cli_staged() {
 	[[ -f "$staged_pkg/$cli_rel" ]] || fail "the staged Pi CLI entry point is missing: $staged_pkg/$cli_rel"
 
 	mkdir -p "$BACKUP_DIR/cli" || fail "could not create $BACKUP_DIR/cli"
+	rm -f "$BACKUP_DIR/cli/package.existed" "$BACKUP_DIR/cli/package.created" \
+		"$BACKUP_DIR/cli/bin.existed" "$BACKUP_DIR/cli/bin.created" \
+		"$BACKUP_DIR/cli/bin-target" "$BACKUP_DIR/cli/bin-file"
 	if [[ -e "$GLOBAL_PI_PACKAGE" ]]; then
 		move_path "$GLOBAL_PI_PACKAGE" "$BACKUP_DIR/cli/package" ||
 			fail "could not move the existing Pi package aside ($GLOBAL_PI_PACKAGE)"
 		: >"$BACKUP_DIR/cli/package.existed"
+	else
+		# There was no global Pi before: a rollback must remove the one this run
+		# activates, or the machine is left with a Pi the user never installed.
+		: >"$BACKUP_DIR/cli/package.created"
 	fi
 	if [[ -e "$GLOBAL_PI_BIN" || -L "$GLOBAL_PI_BIN" ]]; then
 		local old_target
@@ -708,7 +729,8 @@ install_pi_cli_staged() {
 			rm -f "$BACKUP_DIR/cli/bin-target"
 		fi
 	else
-		rm -f "$BACKUP_DIR/cli/bin-target" "$BACKUP_DIR/cli/bin.existed" "$BACKUP_DIR/cli/bin-file"
+		# Likewise for the bin entry: record that it must be removed again.
+		: >"$BACKUP_DIR/cli/bin.created"
 	fi
 	journal_write active activated-cli
 
@@ -1293,7 +1315,17 @@ restore_from_backup() {
 		fi
 	done
 
-	# Global Pi CLI.
+	# Global Pi CLI: put the previous package back, or remove one this run created.
+	if [[ -f "$BACKUP_DIR/cli/package.created" ]]; then
+		local created_package="${GLOBAL_PI_PACKAGE:-}"
+		if [[ -z "$created_package" ]] && [[ -n "${GLOBAL_NPM_ROOT:-}" ]]; then
+			created_package="$GLOBAL_NPM_ROOT/@earendil-works/pi-coding-agent"
+		fi
+		if [[ -n "$created_package" ]]; then
+			rm -rf "$created_package" ||
+				echo "pi-bootstrap: could not remove $created_package; it did not exist before this run" >&2
+		fi
+	fi
 	if [[ -f "$BACKUP_DIR/cli/package.existed" ]] && [[ -d "$BACKUP_DIR/cli/package" ]]; then
 		local package_path="${GLOBAL_PI_PACKAGE:-}"
 		if [[ -z "$package_path" ]] && [[ -n "${GLOBAL_NPM_ROOT:-}" ]]; then
@@ -1304,6 +1336,16 @@ restore_from_backup() {
 			mkdir -p "$(dirname "$package_path")" || true
 			move_path "$BACKUP_DIR/cli/package" "$package_path" ||
 				echo "pi-bootstrap: could not restore the previous Pi package to $package_path" >&2
+		fi
+	fi
+	if [[ -f "$BACKUP_DIR/cli/bin.existed" ]] || [[ -f "$BACKUP_DIR/cli/bin.created" ]]; then
+		local bin_path="${GLOBAL_PI_BIN:-}"
+		if [[ -z "$bin_path" && -n "${GLOBAL_NPM_PREFIX:-}" ]]; then
+			bin_path="$GLOBAL_NPM_PREFIX/bin/pi"
+		fi
+		if [[ -f "$BACKUP_DIR/cli/bin.created" ]]; then
+			[[ -z "$bin_path" ]] || rm -f "$bin_path" ||
+				echo "pi-bootstrap: could not remove $bin_path; it did not exist before this run" >&2
 		fi
 	fi
 	if [[ -f "$BACKUP_DIR/cli/bin.existed" ]]; then
@@ -1799,6 +1841,7 @@ preflight() {
 	[[ -w "$STATE_DIR" ]] || fail "$STATE_DIR is not writable"
 	check_settings plan >/dev/null
 	resolve_global_paths
+	require_writable_global_prefix
 }
 
 main() {
