@@ -75,6 +75,11 @@ If anything fails, the moved trees and the old Pi package are moved back, every 
 
 Failure detection does not rely on a Bash `ERR` trap, which is not inherited by functions, command substitutions, subshells, or pipelines. A single `EXIT` trap plus `set -e` covers every in-process exit path; `INT`/`TERM`/`HUP` get their own handler; and the journal covers `SIGKILL` and power loss, where no trap can run — the next invocation restores the interrupted environment before doing anything else.
 
+Two orderings make that recovery reliable rather than best-effort:
+
+- **The journal is written before anything it describes, and a run that cannot write it stops.** If the journal cannot be recorded (a write or `rename` failure, a full disk), the installer refuses to mutate anything when the failure comes at the start, and rolls back when it comes mid-run. A commit whose journal record fails rolls back too, so a transaction can never be left without a record.
+- **Recovery reads only local state and runs first.** `recover_interrupted_run` runs before preflight, before the Git fetch, and before any npm work, using the journal's recorded paths and the moved backups. GitHub or the registry being unreachable, or `settings.json` having been damaged by the crash, cannot block it; the damaged settings are replaced from the backup and the run continues (and may then fail for its own reasons, on a restored environment).
+
 **Boundaries, stated rather than implied:**
 
 - A `SIGKILL` or power loss *during* the restore itself can leave a partially restored tree. The journal and backups remain, so the next run retries; nothing is silently discarded.
@@ -148,7 +153,7 @@ The local extension writes `permission-modes.json` in **Pi's** agent directory �
 $PI_CODING_AGENT_DIR/permission-modes.json     # default: ~/.pi/agent/permission-modes.json
 ```
 
-permission-modes 2.8.0 itself resolves its config from `$HOME/.pi/agent/permission-modes.json` and ignores `PI_CODING_AGENT_DIR`. When those two paths differ, `/classifier-model` writes the selection to Pi's directory and mirrors the classifier block to the path permission-modes reads, so the gate cannot keep using a different file. The historical `PI_AGENT_DIR` variable is ignored here exactly as Pi ignores it (the installer accepts it for its own paths and translates it for the `pi` process it drives).
+permission-modes 2.8.0 itself resolves its config from `$HOME/.pi/agent/permission-modes.json` and ignores `PI_CODING_AGENT_DIR`; the pinned source sets that path at module load and offers no supported way to redirect it. `/classifier-model` therefore writes only when Pi's directory **is** that directory. With any other `PI_CODING_AGENT_DIR` the command fails closed, explains why, and writes nothing — it never mirrors the selection into `$HOME/.pi/agent`, because that would let a test or a throwaway Pi instance overwrite the user's real configuration. In that setup, set the `classifier` block in `$HOME/.pi/agent/permission-modes.json` directly. The historical `PI_AGENT_DIR` variable is ignored here exactly as Pi ignores it (the installer accepts it for its own paths and translates it for the `pi` process it drives).
 
 A missing classifier timeout defaults to 60000 ms; an existing `timeoutMs` is retained. Successful changes invoke Pi's supported `ctx.reload()` API. If reload fails, the command saves the file and asks the user to run `/reload`.
 
@@ -160,7 +165,7 @@ scripts/check-embedded-extension.sh
 
 ## Upgrade policy
 
-Monthly maintenance starts by finding the newest stable Pi and stable releases of the default and optional extensions. It checks package metadata, peer dependencies, changelogs, Pi release documentation, and the exact Pi-bound files. If any core component is incompatible, the previous confirmed-good matrix remains in place. The maintenance instructions are in [`docs/monthly-maintenance-prompt.md`](docs/monthly-maintenance-prompt.md); the 2026-10 upgrade evidence is in [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md) and [`docs/upgrade-risk-review.md`](docs/upgrade-risk-review.md); the R2 engineering closure is in [`docs/r2-closure-report.md`](docs/r2-closure-report.md), and the R3 upgrade-safety closure in [`docs/r3-closure-report.md`](docs/r3-closure-report.md).
+Monthly maintenance starts by finding the newest stable Pi and stable releases of the default and optional extensions. It checks package metadata, peer dependencies, changelogs, Pi release documentation, and the exact Pi-bound files. If any core component is incompatible, the previous confirmed-good matrix remains in place. The maintenance instructions are in [`docs/monthly-maintenance-prompt.md`](docs/monthly-maintenance-prompt.md); the 2026-10 upgrade evidence is in [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md) and [`docs/upgrade-risk-review.md`](docs/upgrade-risk-review.md); the R2 engineering closure is in [`docs/r2-closure-report.md`](docs/r2-closure-report.md), the R3 upgrade-safety closure in [`docs/r3-closure-report.md`](docs/r3-closure-report.md), and the independent-review closure (H1–H4) in [`docs/r4-closure-report.md`](docs/r4-closure-report.md).
 
 ## Upstream API verification
 
@@ -173,7 +178,7 @@ scripts/tests/run-all.sh           # everything available offline
 scripts/tests/run-all.sh --fetch   # also download test fixtures
 ```
 
-Each test runs with its own scratch `HOME` and `TMPDIR`, stubbed `pi`/`npm`/`curl`/`tmux`, and loopback mock servers; none reads the real `~/.pi`, and none needs a credential. The suite refuses to run against the real home directory, drops inherited `PI_CODING_AGENT_DIR`/`PI_AGENT_DIR` for every test, and `test-default-stack.mjs` copies any agent directory it is given before touching it.
+Each test runs with its own scratch `HOME` and `TMPDIR`, stubbed `pi`/`npm`/`curl`/`tmux`, and loopback mock servers; none reads the real `~/.pi`, and none needs a credential. The suite refuses to run against the real home directory, drops inherited `PI_CODING_AGENT_DIR`/`PI_AGENT_DIR` and forces `HOME`, the npm prefix and cache, and the tmux config inside the isolation tree for every test, and `test-default-stack.mjs` copies any agent directory it is given before touching it.
 
 Tests that cannot run report `SKIP`, never a false `PASS`. Real-runtime tests also SKIP when the installed component is **not exactly** the pinned version (Pi 1.4.0, permission-modes 2.8.0 at `cf77816`, pi-btw 0.62.0, advisor-flow 0.14.2); a newer version is not "good enough", because it would make a PASS mean something this repository never tested.
 
@@ -187,8 +192,8 @@ Tests that cannot run report `SKIP`, never a false `PASS`. Real-runtime tests al
 | `scripts/tests/test-classifier-baseurl.mjs` | 2.7.0 misroutes / 2.8.0 honors the auth-resolved `baseUrl` (real `ModelRegistry`) |
 | `scripts/tests/test-rpc-smoke.mjs` | headless Pi start plus command registration and invocation |
 | `scripts/tests/test-default-stack.mjs` | all five default extensions on one real loader |
-| `scripts/tests/test-rollback.sh` | every failure shape: after backup/removal/install/verification/keybindings/tmux/last step, nested function in `$( )`, failing pipeline, failing subshell, `SIGINT`, `SIGTERM`, `SIGKILL` + recovery on the next run, created files removed, customised keybindings/tmux restored |
-| `scripts/tests/test-config-path.sh` | `/classifier-model` path: default HOME, custom/relative/trailing-slash/`~` `PI_CODING_AGENT_DIR`, `PI_AGENT_DIR` ignored, mirror to the upstream path, persistence across reload |
+| `scripts/tests/test-rollback.sh` | every failure shape: after backup/removal/install/verification/keybindings/tmux/last step, nested function in `$( )`, failing pipeline, failing subshell, `SIGINT`, `SIGTERM`, `SIGKILL` + recovery on the next run, `SIGKILL` at each CLI filesystem boundary, journal write/no-space/rename faults at every phase, offline recovery over damaged settings, created files removed, customised keybindings/tmux restored |
+| `scripts/tests/test-config-path.sh` | `/classifier-model` path: default HOME (also spelled with a trailing slash or relatively), `PI_AGENT_DIR` ignored, and every custom `PI_CODING_AGENT_DIR` refused with the real `$HOME` config left byte-identical; persistence across reload |
 | `scripts/tests/test-isolation-guards.mjs` | the suite refuses the real HOME and an agent dir outside it; default-stack SKIPs a mismatched stack and never writes the given directory |
 | `scripts/tests/test-version-matrix.mjs` | `install.sh` and `lib-pi.mjs` agree on every pin, and the embedded verifier matches its source |
 | `scripts/tests/test-real-upgrade.mjs` | **real CLI**: Pi 1.0.2 + 2.7.0/0.61.1/0.11.0 from npm, install.sh fails after installing 1.4.0/2.8.0, Pi 1.0.2 loads every restored package again, then a clean run verifies the pinned matrix (opt-in: `PI_BOOTSTRAP_REAL_UPGRADE=1`) |

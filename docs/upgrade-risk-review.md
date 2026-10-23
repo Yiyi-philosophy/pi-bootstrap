@@ -26,9 +26,9 @@ Risks, mitigations, and residual exposure for the recommended matrix. Severity r
 
 **Risk (medium):** permission-modes 2.8.0 resolves its config from `$HOME/.pi/agent/permission-modes.json` and ignores Pi's `PI_CODING_AGENT_DIR`. With a custom directory, `/classifier-model` and the gate would read different files: the command appears to work while the classifier keeps the old selection (or no selection).
 
-- Mitigation: the extension resolves Pi's directory the way Pi does, writes the selection there, and mirrors the classifier block to the upstream path (preserving that file's unrelated settings). The upstream file's classifier block seeds the baseline on first use, so an existing model/timeout is not replaced by defaults.
-- Evidence: `scripts/tests/test-config-path.sh` (default HOME, custom/relative/trailing-slash/`~`, `PI_AGENT_DIR` ignored, mirror contents, reload persistence).
-- Residual: two files exist while a custom directory is in use. The mirror keeps them in agreement for changes made through `/classifier-model`; a hand edit of one file is not propagated.
+- Mitigation (R4, replaces the R3 mirror): the extension resolves Pi's directory the way Pi does and writes only when that directory is the one permission-modes reads (`$HOME/.pi/agent`). With any other directory the command refuses before showing the picker, explains which file the gate reads, and writes nothing. The pinned upstream source exposes no supported way to redirect its path (`config.ts` sets it at module load; only a test helper can change it), so a mirror is the only alternative — and a mirror means a test or throwaway Pi instance with `PI_CODING_AGENT_DIR` set would rewrite the real user's `~/.pi/agent/permission-modes.json`. That happened once during development; it must not be reachable again.
+- Evidence: `scripts/tests/test-config-path.sh` (default HOME including trailing-slash and relative spellings, `PI_AGENT_DIR` ignored, every custom directory refused with the real `$HOME` file byte-identical, no picker shown, reload persistence).
+- Residual: `/classifier-model` is unavailable under a custom agent directory; the `classifier` block must be edited in `$HOME/.pi/agent/permission-modes.json` by hand. Recorded in the R4 report as an accepted limitation, not a silent behaviour.
 
 ## Classifier and permission-gate security
 
