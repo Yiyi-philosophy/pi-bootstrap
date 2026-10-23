@@ -19,18 +19,44 @@ const extensionPath = path.join(repo, "extensions/classifier-model.ts");
 
 const home = process.env.HOME;
 assert(home && !home.startsWith("/root"), "HOME must be an isolated scratch directory");
-const agentDir = path.resolve(process.env.PI_CODING_AGENT_DIR || path.join(home, ".pi", "agent"));
+// Resolve a path physically: symlinks are followed for the part that exists,
+// and a genuinely missing tail is appended lexically. A component that exists
+// as a symlink but does not resolve (dangling, or cyclic -> ELOOP) is refused
+// rather than treated as a missing path, because it cannot be proven to stay
+// inside the scratch tree. Mirrors lib.sh physical_path().
+function physicalPath(target) {
+	const rest = [];
+	let base = path.resolve(target);
+	for (;;) {
+		try {
+			return path.join(fs.realpathSync(base), ...rest);
+		} catch (error) {
+			if (error.code !== "ENOENT") {
+				throw new Error(`refusing to run: ${target} cannot be resolved (${base}: ${error.code})`);
+			}
+			if (fs.lstatSync(base, { throwIfNoEntry: false })?.isSymbolicLink()) {
+				throw new Error(`refusing to run: ${target} contains a dangling symlink at ${base}`);
+			}
+			const parent = path.dirname(base);
+			if (parent === base) throw new Error(`refusing to run: ${target} cannot be resolved`);
+			rest.unshift(path.basename(base));
+			base = parent;
+		}
+	}
+}
+const agentDir = physicalPath(process.env.PI_CODING_AGENT_DIR || path.join(home, ".pi", "agent"));
 // This test writes permission-modes.json. Refuse any directory that is not
 // inside this run's scratch HOME, so a wrong PI_CODING_AGENT_DIR can never
-// overwrite a real Pi configuration (M2).
-const scratchHome = path.resolve(home);
+// overwrite a real Pi configuration (M2). Both sides are physical, so a
+// symlink inside the scratch HOME that points outside it is refused too.
+const scratchHome = physicalPath(home);
 assert(
 	agentDir === scratchHome || agentDir.startsWith(`${scratchHome}${path.sep}`),
 	`refusing to run: agent dir ${agentDir} is outside the scratch HOME ${scratchHome}`,
 );
 // A real `$HOME` is itself "inside HOME", so also require that HOME is a
 // scratch directory under TMPDIR (run-all.sh sets both to the same fresh dir).
-const scratchRoot = path.resolve(os.tmpdir());
+const scratchRoot = physicalPath(os.tmpdir());
 assert(
 	scratchHome === scratchRoot || scratchHome.startsWith(`${scratchRoot}${path.sep}`),
 	`refusing to run: HOME ${scratchHome} is not a scratch directory under ${scratchRoot}; this test writes permission-modes.json`,

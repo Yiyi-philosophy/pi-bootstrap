@@ -302,6 +302,22 @@ written looks like a scratch directory (a symlink to `/home/<user>`, a symlink
 to its parent, or an agent-directory symlink pointing at `~/.pi/agent`).
 `test-isolation-guards.mjs` covers all three, and all three are refused.
 
+Amendment (R3-closure review, finding 1): `physical_path()` originally tested
+`-e`, so a **dangling** symlink was mistaken for a plain nonexistent path and
+appended lexically - a link inside the scratch HOME pointing anywhere therefore
+passed the guard. `physical_path()` now returns non-zero for any component that
+exists only as a symlink and does not resolve (dangling or cyclic), and
+`require_scratch_home` turns that into a refusal. `test-isolation-guards.mjs`
+covers a dangling `HOME`, a dangling agent directory, a path *below* a dangling
+link and a symlink loop.
+
+Amendment (finding 2): `test-classifier-config.mjs` compared `path.resolve()`
+strings, so an agent path spelled inside the scratch HOME but resolving outside
+it passed and the battery wrote `permission-modes.json` through the link. The
+guard now resolves both sides physically (same dangling/cyclic rule as
+`lib.sh`) before comparing; `test-isolation-guards.mjs` reproduces the escaping
+`HOME/.pi` symlink and asserts nothing is written outside HOME.
+
 No test reads, writes, or "repairs" `~/.pi/agent/permission-modes.json`. The
 real file was fingerprinted before and after this round (`size=357`,
 `sha256=ec33359e…46b11`, mtime `2026-10-23 02:36:32`, unchanged); the incident

@@ -39,28 +39,48 @@ real_home() {
 # the rest appended lexically. A symlink to the real home therefore resolves to
 # the real home and is caught by the guards below instead of passing a textual
 # "it is under TMPDIR" check.
+#
+# Resolution fails closed (non-zero, no output) when a component that exists is
+# a symlink that does not resolve - dangling or cyclic. Such a path cannot be
+# proven to stay inside a scratch tree, so it must not be treated as a plain
+# nonexistent path. Only a missing tail that is not a symlink is appended
+# lexically; PI_CODING_AGENT_DIR is normally created after this guard runs.
 physical_path() {
-	local target="$1" suffix=""
+	local target="$1" suffix="" resolved
 	target="${target%/}"
 	[[ -n "$target" ]] || target="/"
-	while [[ ! -e "$target" && "$target" != "/" ]]; do
+	while :; do
+		if [[ -e "$target" ]]; then
+			resolved="$(cd -P -- "$target" 2>/dev/null && pwd -P)" || return 1
+			printf '%s%s\n' "$resolved" "$suffix"
+			return 0
+		elif [[ -L "$target" ]]; then
+			# The link itself exists but nothing resolves behind it: dangling or
+			# cyclic. Neither can be proven to be inside a scratch tree.
+			return 1
+		fi
+		[[ "$target" != "/" ]] || return 1
 		suffix="/$(basename "$target")$suffix"
 		target="$(dirname "$target")"
 	done
-	printf '%s%s\n' "$(cd -P "$target" 2>/dev/null && pwd)" "$suffix"
 }
 
 require_scratch_home() {
-	local home="${HOME:-}" real home_physical
+	local home="${HOME:-}" real real_raw home_physical
 	[[ -n "$home" ]] || fail_test "HOME is not set"
 	case "$home" in
 		/*) ;;
 		*) fail_test "refusing to run with a relative HOME: $home" ;;
 	esac
 	home="${home%/}"
-	real="$(real_home)"
-	real="$(physical_path "$real")"
-	home_physical="$(physical_path "$home")"
+	real_raw="$(real_home)"
+	real="$real_raw"
+	if [[ -n "$real" ]]; then
+		real="$(physical_path "$real")" ||
+			fail_test "refusing to run: the real home $real_raw has a path that does not resolve; the isolation guard cannot prove anything"
+	fi
+	home_physical="$(physical_path "$home")" ||
+		fail_test "refusing to run with HOME=$home: it is or contains a symlink that does not resolve (dangling or cyclic), so it cannot be proven to be a scratch directory"
 	if [[ -n "$real" ]]; then
 		# Both spellings are checked: a lexical match catches a plain path, and
 		# the physical one catches `HOME=/tmp/x` where /tmp/x is a symlink to the
@@ -83,7 +103,8 @@ require_scratch_home() {
 			/*) ;;
 			*) agent="$PWD/$agent" ;;
 		esac
-		agent_physical="$(physical_path "$agent")"
+		agent_physical="$(physical_path "$agent")" ||
+			fail_test "refusing to run: PI_CODING_AGENT_DIR=$agent is or contains a symlink that does not resolve (dangling or cyclic), so it cannot be proven to be inside HOME=$home"
 		for candidate in "$agent" "$agent_physical"; do
 			case "$candidate" in
 				"$home" | "$home"/* | "$home_physical" | "$home_physical"/*) ;;
