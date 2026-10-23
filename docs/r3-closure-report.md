@@ -284,11 +284,11 @@ This must be reported as a failure of the execution policy, not as a code issue.
 | `ff2075f` | README/TESTED_VERSIONS/risk-review/maintenance docs, GitHub Actions CI |
 | `82a2462` | fresh-machine rollback (remove a Pi the run created), writable-prefix preflight, fresh-install test |
 | `93c0fff` | simplify the bin-entry restore |
-| `e130bff` | this report (`docs/r3-closure-report.md`) |
-| `a0bd9c0` | records `e130bff` in the table above |
-| `30312ac` | lists the report commits (this table) |
+| `e130bff` … | this report, plus the follow-up commits that correct its own commit list |
 
-HEAD is `30312ac`; the tree is clean and nothing was pushed, merged, tagged, or published. No pin was changed.
+`git log --oneline 277e071..HEAD` is the authoritative list (the last few
+commits only edit this table, so naming HEAD from inside it would be
+self-referential). The tree is clean and nothing was pushed, merged, tagged, or published. No pin was changed.
 
 ## Verdict
 
