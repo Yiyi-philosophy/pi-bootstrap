@@ -23,6 +23,9 @@
 #   subshell          a failing subshell
 #   SIGINT/SIGTERM    signals delivered mid-mutation
 #   SIGKILL           recovery on the next run (no trap can run)
+#   SIGKILL @ boundary every filesystem boundary of the staged CLI step (H4)
+#   journal faults    write / no-space / rename failure at every phase (H3)
+#   offline recovery  GitHub, npm and settings.json all unusable (H2)
 set -euo pipefail
 # shellcheck source=scripts/tests/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
@@ -388,6 +391,140 @@ PI_BOOTSTRAP_RECOVER_ONLY=1 run_installer || fail_test "SIGKILL recovery run fai
 assert_contains "$(cat "$root/install.log")" "was interrupted" "crash recovery announced"
 assert_previous_environment "SIGKILL recovery on next run" 0
 pass "SIGKILL: the next invocation restored the previous environment before doing anything"
+
+# --- H4: SIGKILL at every filesystem boundary of the staged CLI step ------
+# The old Pi package is moved aside, the new one is activated, and the bin link
+# is replaced. Each of those is a place the process can die without a trap, so
+# each is paused and killed, and the next run must still restore the old Pi.
+run_kill_at_boundary() {
+	local boundary="$1" pid
+	seed_previous_environment
+	seed_fingerprint="$(environment_fingerprint)"
+	pid="$(start_installer_in_background env PI_BOOTSTRAP_TEST_PAUSE_AT="$boundary" PI_BOOTSTRAP_TEST_SLEEP=30)"
+	for _ in $(seq 1 300); do
+		grep -q "pausing at stage '$boundary'" "$root/install.log" 2>/dev/null && break
+		sleep 0.05
+	done
+	grep -q "pausing at stage '$boundary'" "$root/install.log" ||
+		fail_test "SIGKILL at $boundary: the installer never reached the boundary; log:
+$(cat "$root/install.log")"
+	kill -KILL "$pid"
+	wait "$pid" 2>/dev/null || true
+	[[ -f "$agent/.pi-bootstrap/transaction.env" ]] ||
+		fail_test "SIGKILL at $boundary: no journal survived the kill"
+	PI_BOOTSTRAP_RECOVER_ONLY=1 run_installer ||
+		fail_test "SIGKILL at $boundary: recovery failed: $(tail -10 "$root/install.log")"
+	assert_contains "$(cat "$root/install.log")" "was interrupted" "SIGKILL at $boundary: recovery announced"
+	assert_previous_environment "SIGKILL at $boundary" 0
+	pass "SIGKILL at $boundary: the next run restored the old Pi package and bin entry"
+}
+for boundary in before-package-move after-package-move recorded-cli after-package-activate after-bin-link; do
+	run_kill_at_boundary "$boundary"
+done
+
+# --- H3: a journal that cannot be written fails closed --------------------
+# The journal is the only crash record. If it cannot be written, further
+# mutation must stop: at the start nothing was changed yet, and inside the CLI
+# step the run rolls back.
+assert_journal_failure() {
+	local label="$1" stage="$2" phase_at="$3" mode="$4" expect_rollback="$5"
+	seed_previous_environment
+	seed_fingerprint="$(environment_fingerprint)"
+	if [[ -n "$stage" ]]; then
+		! run_installer PI_BOOTSTRAP_TEST_FAIL_AT="$stage" \
+			PI_BOOTSTRAP_TEST_JOURNAL="$mode" PI_BOOTSTRAP_TEST_JOURNAL_AT="$phase_at" ||
+			fail_test "$label: installer reported success although the journal could not be written"
+	else
+		! run_installer PI_BOOTSTRAP_TEST_JOURNAL="$mode" PI_BOOTSTRAP_TEST_JOURNAL_AT="$phase_at" ||
+			fail_test "$label: installer reported success although the journal could not be written"
+	fi
+	assert_contains "$(cat "$root/install.log")" "could not record the transaction journal" "$label: journal failure reported"
+	if [[ "$expect_rollback" == 1 ]]; then
+		assert_previous_environment "$label" 1
+		pass "$label: rolled back rather than continuing without a journal ($mode fault at $phase_at)"
+	else
+		# Nothing was mutated, so there is nothing to roll back and no backup
+		# directory may be left behind for the next run to trip over.
+		[[ "$(environment_fingerprint)" == "$seed_fingerprint" ]] ||
+			fail_test "$label: the environment changed although the run refused to start"
+		assert_not_contains "$(cat "$root/install.log")" "rolling back" "$label: no rollback was needed"
+		[[ ! -d "$agent/.pi-bootstrap/backup" ]] || fail_test "$label: a backup directory was left behind"
+		[[ ! -f "$agent/.pi-bootstrap/transaction.env" ]] || fail_test "$label: a partial journal was left behind"
+		[[ ! -f "$agent/.pi-bootstrap/transaction.env.tmp" ]] || fail_test "$label: a temporary journal file was left behind"
+		pass "$label: refused before going further ($mode fault at $phase_at)"
+	fi
+}
+# A failed write at the very first record: the run must not start at all.
+assert_journal_failure "journal write fails before the backup" after-config backup write 0
+assert_journal_failure "journal write fails with no space" after-config backup no-space 0
+assert_journal_failure "journal rename fails before the backup" after-config backup rename 0
+# A failed write inside the CLI step: the transaction has started, so the
+# already-made changes must be rolled back rather than left half-applied.
+assert_journal_failure "journal write fails before activating the CLI" after-config activated-cli write 1
+assert_journal_failure "journal rename fails in the CLI step" after-config activated-cli rename 1
+# A failed commit record: the run is not committed, so it rolls back instead of
+# leaving backups a later run would roll back anyway. No injected stage: the
+# run must reach the commit on its own and fail there.
+assert_journal_failure "journal write fails while committing" "" complete write 1
+
+# --- H2: recovery is local-first -----------------------------------------
+# 1. A recover-only run must not need npm or curl at all. Break both, and
+#    record any invocation so a call would be visible.
+seed_previous_environment
+seed_fingerprint="$(environment_fingerprint)"
+pid="$(start_installer_in_background env PI_BOOTSTRAP_TEST_FAIL_AT=after-install-slow PI_BOOTSTRAP_TEST_SLEEP=30)"
+for _ in $(seq 1 300); do
+	grep -q "pausing at stage" "$root/install.log" 2>/dev/null && break
+	sleep 0.05
+done
+grep -q "pausing at stage" "$root/install.log" ||
+	fail_test "offline recovery: the installer never reached the pause point"
+kill -KILL "$pid"
+wait "$pid" 2>/dev/null || true
+: >"$FAKE_NPM_LOG"
+cat >"$root/bin/npm" <<NPM
+#!/usr/bin/env bash
+printf 'npm %s\n' "\$*" >>"$FAKE_NPM_LOG"
+echo "npm: simulated offline registry" >&2
+exit 1
+NPM
+chmod +x "$root/bin/npm"
+PI_BOOTSTRAP_RECOVER_ONLY=1 FAKE_CURL_FAIL=1 \
+	PI_BOOTSTRAP_EXTRA_SETUP="PERMISSION_MODES_REPO=$root/unreachable-github" run_installer ||
+	fail_test "offline recovery: recover-only run failed: $(tail -10 "$root/install.log")"
+[[ ! -s "$FAKE_NPM_LOG" ]] || fail_test "offline recovery: npm was invoked during recovery:
+$(cat "$FAKE_NPM_LOG")"
+assert_not_contains "$(cat "$root/install.log")" "could not fetch" "offline recovery: no Git fetch was attempted"
+assert_previous_environment "offline recovery with npm, curl and GitHub unavailable" 0
+pass "offline recovery: npm, curl and GitHub are never touched when recovering"
+put_stub "$root" fake-npm npm
+
+# 2. A full run whose settings.json was damaged by the crash, with GitHub and
+#    the registry unreachable: the restore must happen first, on the restored
+#    settings, and only then may the run fail. The environment afterwards is
+#    the pre-crash one, not the damaged one.
+seed_previous_environment
+seed_fingerprint="$(environment_fingerprint)"
+pid="$(start_installer_in_background env PI_BOOTSTRAP_TEST_FAIL_AT=after-install-slow PI_BOOTSTRAP_TEST_SLEEP=30)"
+for _ in $(seq 1 300); do
+	grep -q "pausing at stage" "$root/install.log" 2>/dev/null && break
+	sleep 0.05
+done
+grep -q "pausing at stage" "$root/install.log" ||
+	fail_test "damaged-settings recovery: the installer never reached the pause point"
+kill -KILL "$pid"
+wait "$pid" 2>/dev/null || true
+printf '{broken settings left by the crash' >"$settings"
+if PI_BOOTSTRAP_EXTRA_SETUP="PERMISSION_MODES_REPO=$root/unreachable-github" run_installer; then
+	fail_test "damaged-settings recovery: the installer succeeded with an unreachable GitHub"
+fi
+log="$(cat "$root/install.log")"
+assert_contains "$log" "was interrupted" "damaged-settings recovery: recovery ran"
+assert_contains "$log" "could not fetch" "damaged-settings recovery: the run then stopped at the fetch"
+assert_not_contains "$log" "not valid JSON" "damaged-settings recovery: the damaged settings did not block recovery"
+assert_previous_environment "offline recovery over damaged settings" 0
+assert_contains "$(cat "$settings")" "npm:pi-advisor-flow@0.11.0" "damaged-settings recovery: the pre-crash settings are back"
+pass "offline recovery: damaged settings and an unreachable GitHub still restore the previous environment"
 
 # --- a committed run leaves no journal and needs no recovery --------------
 seed_previous_environment

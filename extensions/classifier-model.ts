@@ -25,21 +25,31 @@ export function resolveAgentDir(): string {
 }
 
 export function resolveConfigPath(): string {
-	return join(resolveAgentDir(), "permission-modes.json");
+	return join(requireSupportedAgentDir(), "permission-modes.json");
 }
 
-// Compatibility boundary, verified against the pinned permission-modes 2.8.0
-// source (config.ts): `_configPath = join(homedir(), ".pi", "agent",
-// "permission-modes.json")`. Upstream ignores PI_CODING_AGENT_DIR, so when Pi
-// runs with a custom agent directory the two paths differ. The selection is
-// written to Pi's directory (what the requirement and the installer use) and
-// mirrored to the path upstream actually reads, so `/classifier-model` cannot
-// appear to work while the gate keeps reading a different file. When the paths
-// are equal - the default - there is exactly one file and one write.
-export function resolveConfigPaths(): string[] {
-	const primary = resolveConfigPath();
-	const upstream = join(homedir(), ".pi", "agent", "permission-modes.json");
-	return primary === upstream ? [primary] : [primary, upstream];
+// permission-modes 2.8.0 reads `join(homedir(), ".pi", "agent",
+// "permission-modes.json")` and exposes no way to redirect it: the pinned
+// source (config.ts) sets the path at module load and only its test helper
+// `setGlobalConfigPathForTests` can change it. So with a custom
+// PI_CODING_AGENT_DIR the gate and Pi would use two different files.
+//
+// The selection is deliberately NOT mirrored to the upstream path: a test or a
+// throwaway Pi instance with PI_CODING_AGENT_DIR set would then rewrite the
+// real user's `~/.pi/agent/permission-modes.json`, which is exactly the
+// cross-directory write this command must never perform. Instead the command
+// fails closed and says why, so nobody believes a selection was saved while
+// the gate keeps reading another file.
+function requireSupportedAgentDir(): string {
+	const agentDir = resolve(resolveAgentDir());
+	const upstreamDir = resolve(join(homedir(), ".pi", "agent"));
+	if (agentDir === upstreamDir) return agentDir;
+	const upstreamConfig = join(upstreamDir, "permission-modes.json");
+	throw new Error(
+		`/classifier-model cannot save a selection here: Pi is using ${agentDir}, but permission-modes 2.8.0 always reads ${upstreamConfig} and cannot be redirected. ` +
+			`Writing that file anyway would change a directory this Pi does not own, so nothing was written. ` +
+			`Run Pi with the default agent directory (unset PI_CODING_AGENT_DIR), or set the classifier block in ${upstreamConfig} yourself.`,
+	);
 }
 
 function readConfig(configPath: string): JsonObject {
@@ -93,16 +103,6 @@ function writeConfig(configPath: string, config: JsonObject): void {
 	}
 }
 
-// Read a config file that may be absent or unreadable without failing the
-// command: used only to seed a baseline from the compatibility mirror.
-function safeReadConfig(configPath: string): JsonObject | undefined {
-	try {
-		return readConfig(configPath);
-	} catch {
-		return undefined;
-	}
-}
-
 function classifierConfig(config: JsonObject): JsonObject {
 	const value = config.classifier;
 	return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
@@ -123,8 +123,16 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 
 			// Resolved per invocation so a changed PI_CODING_AGENT_DIR (or a
 			// reload in a new environment) always targets Pi's current directory.
-			const configPaths = resolveConfigPaths();
-			const configPath = configPaths[0];
+			// An unsupported directory is refused before the picker is shown:
+			// the user must not spend a selection on a write that cannot reach
+			// the file permission-modes reads.
+			let configPath: string;
+			try {
+				configPath = resolveConfigPath();
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				return;
+			}
 
 			let config: JsonObject;
 			try {
@@ -152,21 +160,7 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// When Pi runs with a custom agent directory, permission-modes 2.8.0
-			// still reads $HOME/.pi/agent/permission-modes.json. On the first use
-			// that file may hold the user's only classifier block, so it seeds the
-			// baseline instead of being overwritten with defaults.
-			let baseline = config;
-			if (configPaths.length > 1) {
-				const upstream = safeReadConfig(configPaths[1]);
-				const upstreamClassifier = upstream ? classifierConfig(upstream) : {};
-				const primaryClassifier = classifierConfig(config);
-				if (Object.keys(primaryClassifier).length === 0 && Object.keys(upstreamClassifier).length > 0) {
-					baseline = { ...config, classifier: upstreamClassifier };
-				}
-			}
-
-			const current = classifierConfig(baseline);
+			const current = classifierConfig(config);
 			const currentModel = typeof current.model === "string" ? current.model : undefined;
 			const labels = models.map((model) => {
 				const id = modelName(model);
@@ -191,22 +185,10 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 			}
 
 			try {
-				for (const target of configPaths) {
-					// Each copy keeps that file's own unrelated settings (permission
-					// rules, custom keys); only the classifier block is shared, so Pi's
-					// directory and the file permission-modes reads stay in agreement.
-					const base = target === configPath ? config : readConfig(target);
-					writeConfig(target, { ...base, classifier: nextClassifier });
-				}
+				writeConfig(configPath, { ...config, classifier: nextClassifier });
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 				return;
-			}
-			if (configPaths.length > 1) {
-				ctx.ui.notify(
-					`Classifier configuration saved to ${configPath} and mirrored to ${configPaths[1]}, which permission-modes 2.8.0 reads.`,
-					"info",
-				);
 			}
 
 			try {

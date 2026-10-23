@@ -38,7 +38,16 @@ export PI_BOOTSTRAP_FETCH=0
 # point a test at a real Pi installation. The real-runtime tests read the pinned
 # fixtures through PI_BOOTSTRAP_* instead, and test-default-stack copies the
 # directory it is given before touching it.
-drop_agent_overrides=(env -u PI_CODING_AGENT_DIR -u PI_AGENT_DIR)
+#
+# The scoped configuration is forced rather than inherited (R4): HOME, TMPDIR,
+# the npm prefix and cache, and the tmux config all point inside the isolation
+# tree, so a test cannot reach the developer's npm global tree, ~/.tmux.conf, or
+# a Pi agent directory even when the caller's environment names them. The
+# PI_BOOTSTRAP_* inputs stay inherited: they are read-only fixtures for the
+# real-runtime tests.
+dropped=(env -u PI_CODING_AGENT_DIR -u PI_AGENT_DIR -u PI_CONFIG_DIR \
+	-u npm_config_prefix -u npm_config_cache -u NPM_CONFIG_PREFIX -u NPM_CONFIG_CACHE \
+	-u TMUX_CONFIG_FILE -u TMUX)
 
 pass_count=0
 skip_count=0
@@ -51,7 +60,11 @@ run() {
 	shift
 	local isolation status=0
 	isolation="$(mktemp -d "${TMPDIR:-/tmp}/pi-bootstrap-run.XXXXXX")"
-	"${drop_agent_overrides[@]}" TMPDIR="$isolation" HOME="$isolation" "$@" || status=$?
+	mkdir -p "$isolation/home" "$isolation/npm-prefix" "$isolation/npm-cache"
+	"${dropped[@]}" TMPDIR="$isolation" HOME="$isolation/home" \
+		npm_config_prefix="$isolation/npm-prefix" npm_config_cache="$isolation/npm-cache" \
+		TMUX_CONFIG_FILE="$isolation/home/.tmux.conf" \
+		"$@" || status=$?
 	rm -rf "$isolation"
 	case "$status" in
 		0) pass_count=$((pass_count + 1)) ;;

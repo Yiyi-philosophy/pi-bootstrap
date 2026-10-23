@@ -166,16 +166,58 @@ JOURNAL="$STATE_DIR/transaction.env"
 
 journal_write() {
 	local status="$1" phase="$2"
-	[[ -d "$STATE_DIR" ]] || return 0
+	local failure="could not record the transaction journal $JOURNAL"
+	if [[ ! -d "$STATE_DIR" ]]; then
+		warn "$failure: $STATE_DIR does not exist"
+		return 1
+	fi
+	if journal_fault "$phase" write; then
+		warn "$failure (write failed)"
+		return 1
+	fi
+	# Every path recovery needs is stored here as a shell assignment, so a
+	# recovery run never has to ask npm, git, or the network where the global
+	# Pi lives.
 	{
 		printf 'status=%q\n' "$status"
 		printf 'phase=%q\n' "$phase"
 		printf 'agent_dir=%q\n' "$AGENT_DIR"
-		printf 'global_package=%q\n' "${GLOBAL_PI_PACKAGE:-}"
-		printf 'global_bin=%q\n' "${GLOBAL_PI_BIN:-}"
+		printf 'GLOBAL_PI_PACKAGE=%q\n' "${GLOBAL_PI_PACKAGE:-}"
+		printf 'GLOBAL_PI_BIN=%q\n' "${GLOBAL_PI_BIN:-}"
+		printf 'GLOBAL_NPM_PREFIX=%q\n' "${GLOBAL_NPM_PREFIX:-}"
+		printf 'GLOBAL_NPM_ROOT=%q\n' "${GLOBAL_NPM_ROOT:-}"
 		printf 'pid=%q\n' "$$"
-	} >"$JOURNAL.tmp" || return 0
-	mv -f "$JOURNAL.tmp" "$JOURNAL" || return 0
+	} >"$JOURNAL.tmp" || {
+		warn "$failure (write failed)"
+		rm -f "$JOURNAL.tmp"
+		return 1
+	}
+	if journal_fault "$phase" rename; then
+		warn "$failure (atomic rename failed)"
+		rm -f "$JOURNAL.tmp"
+		return 1
+	fi
+	mv -f "$JOURNAL.tmp" "$JOURNAL" || {
+		warn "$failure (rename failed)"
+		rm -f "$JOURNAL.tmp"
+		return 1
+	}
+}
+
+# Test-only fault injection for the journal, exercised by
+# scripts/tests/test-rollback.sh:
+#   PI_BOOTSTRAP_TEST_JOURNAL=write|rename|no-space
+#   PI_BOOTSTRAP_TEST_JOURNAL_AT=<phase>   restrict the fault to one phase
+# "no-space" models ENOSPC: the temporary file cannot be written at all.
+journal_fault() {
+	local phase="$1" step="$2" mode="${PI_BOOTSTRAP_TEST_JOURNAL:-}"
+	[[ -n "$mode" ]] || return 1
+	[[ -z "${PI_BOOTSTRAP_TEST_JOURNAL_AT:-}" || "$PI_BOOTSTRAP_TEST_JOURNAL_AT" == "$phase" ]] || return 1
+	case "$mode" in
+		"$step") return 0 ;;
+		no-space) [[ "$step" == write ]] && return 0 ;;
+	esac
+	return 1
 }
 
 warn() {
@@ -210,23 +252,37 @@ test_hook() {
 			;;
 		sleep | after-remove-slow | after-install-slow | after-backup-slow)
 			# Not a failure: hold the run here so a test can deliver a signal.
-			echo "pi-bootstrap: test: pausing at stage '${stage}'" >&2
-			if [[ -n "${PI_BOOTSTRAP_TEST_SIGNAL:-}" ]]; then
-				# Deliver a real signal to this process (a signal test must not
-				# depend on the shell's job-control SIG_IGN behavior for
-				# background jobs).
-				kill -"${PI_BOOTSTRAP_TEST_SIGNAL}" "$BASHPID"
-				return 0
-			fi
-			# Background sleep + wait so the shell handles a signal immediately;
-			# a foreground `sleep` defers trap handling until it returns.
-			sleep "${PI_BOOTSTRAP_TEST_SLEEP:-5}" &
-			wait $! 2>/dev/null || true
+			test_pause "$stage"
 			;;
 		*)
 			fail "injected failure at stage '${stage}' (PI_BOOTSTRAP_TEST_FAIL_AT)"
 			;;
 	esac
+}
+
+# Named crash boundary inside the destructive CLI step, used by the SIGKILL
+# matrix in scripts/tests/test-rollback.sh: every filesystem operation that
+# recovery depends on is a place the process may die without running a trap.
+test_boundary() {
+	local stage="$1"
+	[[ -n "${PI_BOOTSTRAP_TEST_PAUSE_AT:-}" && "${PI_BOOTSTRAP_TEST_PAUSE_AT}" == "$stage" ]] || return 0
+	test_pause "$stage"
+}
+
+test_pause() {
+	local stage="$1"
+	echo "pi-bootstrap: test: pausing at stage '${stage}'" >&2
+	if [[ -n "${PI_BOOTSTRAP_TEST_SIGNAL:-}" ]]; then
+		# Deliver a real signal to this process (a signal test must not
+		# depend on the shell's job-control SIG_IGN behavior for
+		# background jobs).
+		kill -"${PI_BOOTSTRAP_TEST_SIGNAL}" "$BASHPID"
+		return 0
+	fi
+	# Background sleep + wait so the shell handles a signal immediately;
+	# a foreground `sleep` defers trap handling until it returns.
+	sleep "${PI_BOOTSTRAP_TEST_SLEEP:-5}" &
+	wait $! 2>/dev/null || true
 }
 
 test_nested_failure() {
@@ -298,13 +354,29 @@ hash_file() {
 }
 
 # Move a path, falling back to copy+delete when source and destination are on
-# different filesystems (a staging prefix under TMPDIR often is).
+# different filesystems (a staging prefix under TMPDIR often is). The copy goes
+# to a temporary sibling that is renamed into place only when complete, so a
+# crash mid-copy never leaves a destination that recovery would mistake for a
+# finished backup.
 move_path() {
-	local src="$1" dst="$2"
+	local src="$1" dst="$2" staging
 	if mv -f "$src" "$dst" 2>/dev/null; then
 		return 0
 	fi
-	cp -a "$src" "$dst" || return 1
+	staging="${dst}.incoming.$$"
+	rm -rf "$staging"
+	cp -a "$src" "$staging" || {
+		rm -rf "$staging"
+		return 1
+	}
+	rm -rf "$dst" || {
+		rm -rf "$staging"
+		return 1
+	}
+	mv -f "$staging" "$dst" || {
+		rm -rf "$staging"
+		return 1
+	}
 	rm -rf "$src" || return 1
 }
 
@@ -702,24 +774,41 @@ install_pi_cli_staged() {
 	[[ -f "$staged_pkg/$cli_rel" ]] || fail "the staged Pi CLI entry point is missing: $staged_pkg/$cli_rel"
 
 	mkdir -p "$BACKUP_DIR/cli" || fail "could not create $BACKUP_DIR/cli"
-	rm -f "$BACKUP_DIR/cli/package.existed" "$BACKUP_DIR/cli/package.created" \
+	rm -f "$BACKUP_DIR/cli/package.created" \
 		"$BACKUP_DIR/cli/bin.existed" "$BACKUP_DIR/cli/bin.created" \
 		"$BACKUP_DIR/cli/bin-target" "$BACKUP_DIR/cli/bin-file"
+
+	# The journal carries the global paths before any of them is touched, so a
+	# recovery run never has to ask npm (or the network) where Pi lives.
+	journal_write active activated-cli ||
+		fail "could not record the transaction journal $JOURNAL; the global Pi was not touched"
+
+	# Every decision is recorded BEFORE the filesystem operation it describes
+	# (H4). A crash between the two then leaves a record that is merely
+	# conservative: the marker says "there was a package" while the package is
+	# still in place, which recovery handles because the moved tree itself is
+	# the authoritative backup (see restore_from_backup). Recording after the
+	# move, as before, could strand a moved-away Pi package with no record of
+	# where it came from.
 	if [[ -e "$GLOBAL_PI_PACKAGE" ]]; then
+		: >"$BACKUP_DIR/cli/package.existed" || fail "could not record the existing Pi package"
+		# The H4 window: the record exists, the package has not moved yet.
+		test_boundary before-package-move
 		move_path "$GLOBAL_PI_PACKAGE" "$BACKUP_DIR/cli/package" ||
 			fail "could not move the existing Pi package aside ($GLOBAL_PI_PACKAGE)"
-		: >"$BACKUP_DIR/cli/package.existed"
+		test_boundary after-package-move
 	else
 		# There was no global Pi before: a rollback must remove the one this run
 		# activates, or the machine is left with a Pi the user never installed.
-		: >"$BACKUP_DIR/cli/package.created"
+		: >"$BACKUP_DIR/cli/package.created" || fail "could not record the missing Pi package"
 	fi
 	if [[ -e "$GLOBAL_PI_BIN" || -L "$GLOBAL_PI_BIN" ]]; then
 		local old_target
-		: >"$BACKUP_DIR/cli/bin.existed"
+		: >"$BACKUP_DIR/cli/bin.existed" || fail "could not record the existing pi bin entry"
 		if [[ -L "$GLOBAL_PI_BIN" ]]; then
 			old_target="$(readlink "$GLOBAL_PI_BIN" 2>/dev/null || true)"
-			[[ -z "$old_target" ]] || printf '%s\n' "$old_target" >"$BACKUP_DIR/cli/bin-target"
+			[[ -z "$old_target" ]] || printf '%s\n' "$old_target" >"$BACKUP_DIR/cli/bin-target" ||
+				fail "could not record the pi bin link target"
 			rm -f "$BACKUP_DIR/cli/bin-file"
 		else
 			# npm normally links the bin entry, but a plain wrapper script is a
@@ -730,18 +819,20 @@ install_pi_cli_staged() {
 		fi
 	else
 		# Likewise for the bin entry: record that it must be removed again.
-		: >"$BACKUP_DIR/cli/bin.created"
+		: >"$BACKUP_DIR/cli/bin.created" || fail "could not record the missing pi bin entry"
 	fi
-	journal_write active activated-cli
+	test_boundary recorded-cli
 
 	mkdir -p "$(dirname "$GLOBAL_PI_PACKAGE")" "$GLOBAL_NPM_PREFIX/bin" ||
 		fail "could not create the npm global directories"
 	move_path "$staged_pkg" "$GLOBAL_PI_PACKAGE" || fail "could not activate the staged Pi package"
+	test_boundary after-package-activate
 	bin_target="$(node -e '
 		const path = require("node:path");
 		process.stdout.write(path.relative(process.argv[1], process.argv[2]));
 	' "$GLOBAL_NPM_PREFIX/bin" "$GLOBAL_PI_PACKAGE/$cli_rel")" || fail "could not compute the pi bin link target"
 	ln -sfn "$bin_target" "$GLOBAL_PI_BIN" || fail "could not create the pi bin link at $GLOBAL_PI_BIN"
+	test_boundary after-bin-link
 
 	PI_BIN="$GLOBAL_PI_BIN"
 	verify_pi_version "$PI_BIN"
@@ -1258,7 +1349,12 @@ begin_transaction() {
 		fail "a previous rollback is still pending at $BACKUP_DIR; resolve it before running the installer again (see the messages from the failed run)"
 	fi
 	mkdir -p "$BACKUP_DIR" || fail "could not create $BACKUP_DIR"
-	journal_write active backup
+	# The journal is the only crash record, so a run that cannot write it must
+	# not start: nothing has been mutated yet, so undo the empty backup dir.
+	if ! journal_write active backup; then
+		rmdir "$BACKUP_DIR" 2>/dev/null || true
+		fail "could not record the transaction journal $JOURNAL; nothing was changed"
+	fi
 	MUTATION_STARTED=1
 	capture_pre_state
 	snapshot_settings
@@ -1267,11 +1363,38 @@ begin_transaction() {
 	test_hook after-backup-slow
 }
 
+# Resolve where the global Pi package and bin entry are, preferring the values
+# in the journal (see journal_write) and falling back to the npm global prefix
+# for a journal that has none. A recovery run must never call npm for this.
+global_cli_paths() {
+	local root="${GLOBAL_NPM_ROOT:-}"
+	if [[ -z "$root" && -n "${GLOBAL_NPM_PREFIX:-}" ]]; then
+		root="$GLOBAL_NPM_PREFIX/lib/node_modules"
+	fi
+	GLOBAL_PI_PACKAGE="${GLOBAL_PI_PACKAGE:-${root:+$root/@earendil-works/pi-coding-agent}}"
+	GLOBAL_PI_BIN="${GLOBAL_PI_BIN:-${GLOBAL_NPM_PREFIX:+$GLOBAL_NPM_PREFIX/bin/pi}}"
+}
+
+# Verify the environment that was just restored, through the npm global
+# launcher that was restored (not whatever `pi` happens to be first on PATH).
+# This is a local Node load of files already on disk. Returns 0 verified,
+# 3 unprovable (stub Pi, no Node, no recorded pre-state), else a failure.
+verify_restored_environment() {
+	if [[ -n "${GLOBAL_PI_BIN:-}" && -x "$GLOBAL_PI_BIN" ]]; then
+		PI_BIN="$GLOBAL_PI_BIN"
+	fi
+	[[ -n "$VERIFY_STACK_JS" && -f "$BACKUP_DIR/pre-state.json" && -n "${PI_BIN:-}" ]] || return 3
+	command -v node >/dev/null 2>&1 || return 3
+	verify_stack verify --expect "$BACKUP_DIR/pre-state.json" >&2
+}
+
 # Restore everything the journal and backup directory describe. Idempotent:
 # every step checks what is actually present, so it is safe after a partial
 # crash as well as after a trap.
 restore_from_backup() {
 	local original stored created old_target
+
+	global_cli_paths
 
 	# Files the run replaced, then files the run created.
 	if [[ -f "$BACKUP_DIR/files.tsv" ]]; then
@@ -1317,34 +1440,27 @@ restore_from_backup() {
 
 	# Global Pi CLI: put the previous package back, or remove one this run created.
 	if [[ -f "$BACKUP_DIR/cli/package.created" ]]; then
-		local created_package="${GLOBAL_PI_PACKAGE:-}"
-		if [[ -z "$created_package" ]] && [[ -n "${GLOBAL_NPM_ROOT:-}" ]]; then
-			created_package="$GLOBAL_NPM_ROOT/@earendil-works/pi-coding-agent"
-		fi
-		if [[ -n "$created_package" ]]; then
-			rm -rf "$created_package" ||
-				echo "pi-bootstrap: could not remove $created_package; it did not exist before this run" >&2
+		if [[ -n "${GLOBAL_PI_PACKAGE:-}" ]]; then
+			rm -rf "$GLOBAL_PI_PACKAGE" ||
+				echo "pi-bootstrap: could not remove $GLOBAL_PI_PACKAGE; it did not exist before this run" >&2
+		else
+			echo "pi-bootstrap: cannot tell where the Pi package this run created was installed" >&2
 		fi
 	fi
 	if [[ -f "$BACKUP_DIR/cli/package.existed" ]] && [[ -d "$BACKUP_DIR/cli/package" ]]; then
-		local package_path="${GLOBAL_PI_PACKAGE:-}"
-		if [[ -z "$package_path" ]] && [[ -n "${GLOBAL_NPM_ROOT:-}" ]]; then
-			package_path="$GLOBAL_NPM_ROOT/@earendil-works/pi-coding-agent"
-		fi
-		if [[ -n "$package_path" ]]; then
-			rm -rf "$package_path" || true
-			mkdir -p "$(dirname "$package_path")" || true
-			move_path "$BACKUP_DIR/cli/package" "$package_path" ||
-				echo "pi-bootstrap: could not restore the previous Pi package to $package_path" >&2
+		if [[ -n "${GLOBAL_PI_PACKAGE:-}" ]]; then
+			rm -rf "$GLOBAL_PI_PACKAGE" || true
+			mkdir -p "$(dirname "$GLOBAL_PI_PACKAGE")" || true
+			move_path "$BACKUP_DIR/cli/package" "$GLOBAL_PI_PACKAGE" ||
+				echo "pi-bootstrap: could not restore the previous Pi package to $GLOBAL_PI_PACKAGE" >&2
+		else
+			echo "pi-bootstrap: cannot tell where the previous Pi package belongs; it is kept at $BACKUP_DIR/cli/package" >&2
 		fi
 	fi
 	# The bin entry: remove it when the run created it, otherwise put back the
 	# exact link target or the exact plain file.
 	if [[ -f "$BACKUP_DIR/cli/bin.created" ]] || [[ -f "$BACKUP_DIR/cli/bin.existed" ]]; then
 		local bin_path="${GLOBAL_PI_BIN:-}"
-		if [[ -z "$bin_path" && -n "${GLOBAL_NPM_PREFIX:-}" ]]; then
-			bin_path="$GLOBAL_NPM_PREFIX/bin/pi"
-		fi
 		if [[ -n "$bin_path" ]]; then
 			if [[ -f "$BACKUP_DIR/cli/bin.created" ]]; then
 				rm -f "$bin_path" ||
@@ -1386,15 +1502,8 @@ recover() {
 
 	# 0 = restored and proven to load, 3 = restored but unprovable (no real
 	# loader / stub pi), anything else = restored but verification failed.
-	if [[ -n "${GLOBAL_PI_BIN:-}" && -x "${GLOBAL_PI_BIN}" ]]; then
-		PI_BIN="$GLOBAL_PI_BIN"
-	fi
 	local verify_status=0
-	if [[ -n "$VERIFY_STACK_JS" && -f "$BACKUP_DIR/pre-state.json" ]]; then
-		verify_stack verify --expect "$BACKUP_DIR/pre-state.json" >&2 || verify_status=$?
-	else
-		verify_status=3
-	fi
+	verify_restored_environment || verify_status=$?
 	case "$verify_status" in
 		0)
 			echo "pi-bootstrap: previous environment restored and verified: Pi and the managed extensions load, and the commands the previous installation registered are back." >&2
@@ -1421,6 +1530,9 @@ recover_interrupted_run() {
 	status="$(sed -n 's/^status=//p' "$JOURNAL" | head -n 1)"
 	# shellcheck disable=SC1090
 	. "$JOURNAL" 2>/dev/null || true
+	# Journals written before R4 stored the global paths under lowercase names.
+	GLOBAL_PI_PACKAGE="${GLOBAL_PI_PACKAGE:-${global_package:-}}"
+	GLOBAL_PI_BIN="${GLOBAL_PI_BIN:-${global_bin:-}}"
 	if [[ "$status" == "committed" ]]; then
 		echo "pi-bootstrap: cleaning up a previous run that committed but did not finish"
 		discard_backup
@@ -1430,14 +1542,11 @@ recover_interrupted_run() {
 	echo "pi-bootstrap: rolling back to the previous state before continuing..." >&2
 	restore_from_backup
 	# Verify through the npm global launcher that was just restored, not through
-	# whatever `pi` happens to be first on PATH.
-	if [[ -n "${GLOBAL_PI_BIN:-}" && -x "${GLOBAL_PI_BIN}" ]]; then
-		PI_BIN="$GLOBAL_PI_BIN"
-	fi
+	# whatever `pi` happens to be first on PATH. Verification is a local Node
+	# load of the restored files; it is not a prerequisite for restoring them,
+	# so without Node or a recorded pre-state the restore is reported unproven.
 	local verify_status=3
-	if [[ -n "$VERIFY_STACK_JS" && -f "$BACKUP_DIR/pre-state.json" && -n "${PI_BIN:-}" ]]; then
-		verify_stack verify --expect "$BACKUP_DIR/pre-state.json" >&2 || verify_status=$?
-	fi
+	verify_restored_environment || verify_status=$?
 	case "$verify_status" in
 		0)
 			discard_backup
@@ -1454,8 +1563,13 @@ recover_interrupted_run() {
 }
 
 commit_transaction() {
+	# The "committed" journal record must be durable before the backups are
+	# removed. If it cannot be written, the run is not committed: fail() leaves
+	# MUTATION_STARTED set, so the EXIT trap rolls the new environment back
+	# instead of leaving backups that the next run would roll back anyway.
+	journal_write committed complete ||
+		fail "could not record the commit in $JOURNAL; rolling back instead of leaving a pending transaction"
 	RUN_COMMITTED=1
-	journal_write committed complete
 	discard_backup
 	MUTATION_STARTED=0
 }
@@ -1502,21 +1616,31 @@ export function resolveAgentDir(): string {
 }
 
 export function resolveConfigPath(): string {
-	return join(resolveAgentDir(), "permission-modes.json");
+	return join(requireSupportedAgentDir(), "permission-modes.json");
 }
 
-// Compatibility boundary, verified against the pinned permission-modes 2.8.0
-// source (config.ts): `_configPath = join(homedir(), ".pi", "agent",
-// "permission-modes.json")`. Upstream ignores PI_CODING_AGENT_DIR, so when Pi
-// runs with a custom agent directory the two paths differ. The selection is
-// written to Pi's directory (what the requirement and the installer use) and
-// mirrored to the path upstream actually reads, so `/classifier-model` cannot
-// appear to work while the gate keeps reading a different file. When the paths
-// are equal - the default - there is exactly one file and one write.
-export function resolveConfigPaths(): string[] {
-	const primary = resolveConfigPath();
-	const upstream = join(homedir(), ".pi", "agent", "permission-modes.json");
-	return primary === upstream ? [primary] : [primary, upstream];
+// permission-modes 2.8.0 reads `join(homedir(), ".pi", "agent",
+// "permission-modes.json")` and exposes no way to redirect it: the pinned
+// source (config.ts) sets the path at module load and only its test helper
+// `setGlobalConfigPathForTests` can change it. So with a custom
+// PI_CODING_AGENT_DIR the gate and Pi would use two different files.
+//
+// The selection is deliberately NOT mirrored to the upstream path: a test or a
+// throwaway Pi instance with PI_CODING_AGENT_DIR set would then rewrite the
+// real user's `~/.pi/agent/permission-modes.json`, which is exactly the
+// cross-directory write this command must never perform. Instead the command
+// fails closed and says why, so nobody believes a selection was saved while
+// the gate keeps reading another file.
+function requireSupportedAgentDir(): string {
+	const agentDir = resolve(resolveAgentDir());
+	const upstreamDir = resolve(join(homedir(), ".pi", "agent"));
+	if (agentDir === upstreamDir) return agentDir;
+	const upstreamConfig = join(upstreamDir, "permission-modes.json");
+	throw new Error(
+		`/classifier-model cannot save a selection here: Pi is using ${agentDir}, but permission-modes 2.8.0 always reads ${upstreamConfig} and cannot be redirected. ` +
+			`Writing that file anyway would change a directory this Pi does not own, so nothing was written. ` +
+			`Run Pi with the default agent directory (unset PI_CODING_AGENT_DIR), or set the classifier block in ${upstreamConfig} yourself.`,
+	);
 }
 
 function readConfig(configPath: string): JsonObject {
@@ -1570,16 +1694,6 @@ function writeConfig(configPath: string, config: JsonObject): void {
 	}
 }
 
-// Read a config file that may be absent or unreadable without failing the
-// command: used only to seed a baseline from the compatibility mirror.
-function safeReadConfig(configPath: string): JsonObject | undefined {
-	try {
-		return readConfig(configPath);
-	} catch {
-		return undefined;
-	}
-}
-
 function classifierConfig(config: JsonObject): JsonObject {
 	const value = config.classifier;
 	return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
@@ -1600,8 +1714,16 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 
 			// Resolved per invocation so a changed PI_CODING_AGENT_DIR (or a
 			// reload in a new environment) always targets Pi's current directory.
-			const configPaths = resolveConfigPaths();
-			const configPath = configPaths[0];
+			// An unsupported directory is refused before the picker is shown:
+			// the user must not spend a selection on a write that cannot reach
+			// the file permission-modes reads.
+			let configPath: string;
+			try {
+				configPath = resolveConfigPath();
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				return;
+			}
 
 			let config: JsonObject;
 			try {
@@ -1629,21 +1751,7 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// When Pi runs with a custom agent directory, permission-modes 2.8.0
-			// still reads $HOME/.pi/agent/permission-modes.json. On the first use
-			// that file may hold the user's only classifier block, so it seeds the
-			// baseline instead of being overwritten with defaults.
-			let baseline = config;
-			if (configPaths.length > 1) {
-				const upstream = safeReadConfig(configPaths[1]);
-				const upstreamClassifier = upstream ? classifierConfig(upstream) : {};
-				const primaryClassifier = classifierConfig(config);
-				if (Object.keys(primaryClassifier).length === 0 && Object.keys(upstreamClassifier).length > 0) {
-					baseline = { ...config, classifier: upstreamClassifier };
-				}
-			}
-
-			const current = classifierConfig(baseline);
+			const current = classifierConfig(config);
 			const currentModel = typeof current.model === "string" ? current.model : undefined;
 			const labels = models.map((model) => {
 				const id = modelName(model);
@@ -1668,22 +1776,10 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 			}
 
 			try {
-				for (const target of configPaths) {
-					// Each copy keeps that file's own unrelated settings (permission
-					// rules, custom keys); only the classifier block is shared, so Pi's
-					// directory and the file permission-modes reads stay in agreement.
-					const base = target === configPath ? config : readConfig(target);
-					writeConfig(target, { ...base, classifier: nextClassifier });
-				}
+				writeConfig(configPath, { ...config, classifier: nextClassifier });
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 				return;
-			}
-			if (configPaths.length > 1) {
-				ctx.ui.notify(
-					`Classifier configuration saved to ${configPath} and mirrored to ${configPaths[1]}, which permission-modes 2.8.0 reads.`,
-					"info",
-				);
 			}
 
 			try {
@@ -1858,24 +1954,28 @@ main() {
 	trap 'on_signal TERM 15' TERM
 	trap 'on_signal HUP 1' HUP
 
+	# Interrupted-run recovery is local-first (H2): the journal and the moved
+	# backups on this machine are the only inputs. It therefore runs before
+	# preflight, before the settings check (a previous run may have left
+	# settings.json half-written), before the Git fetch, and before any npm
+	# work, so an unreachable network or a corrupt settings file cannot keep a
+	# crashed upgrade from being rolled back. The verifier is embedded in this
+	# script, so materialising it needs no network either.
+	materialize_verify_stack
+	recover_interrupted_run
+	if [[ "${PI_BOOTSTRAP_RECOVER_ONLY:-0}" == 1 ]]; then
+		echo "pi-bootstrap: recovery-only run complete" >&2
+		exit 0
+	fi
+
 	preflight
 
 	# Verify the pinned source before anything from it can execute.
 	prepare_permission_modes_snapshot
 
-	materialize_verify_stack
 	locate_current_pi
 	if [[ -n "$PI_BIN" ]]; then
 		export PI_CODING_AGENT_DIR="$AGENT_DIR"
-	fi
-
-	# A previous run that was killed before any trap could fire leaves a journal
-	# and backups. Restore that environment before this run changes anything,
-	# then let the user decide whether to retry. Test-only: stop after recovery.
-	recover_interrupted_run
-	if [[ "${PI_BOOTSTRAP_RECOVER_ONLY:-0}" == 1 ]]; then
-		echo "pi-bootstrap: recovery-only run complete" >&2
-		exit 0
 	fi
 
 	begin_transaction
