@@ -22,7 +22,13 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { findPi, findPackageDir, skipUnlessPi } from "./lib-pi.mjs";
+import {
+	findPi,
+	findPackageDir,
+	skipUnlessPi,
+	skipUnlessPackage,
+	skipUnlessPinnedPermissionModes,
+} from "./lib-pi.mjs";
 
 const PM_COMMIT = "cf77816f28e102409dddbf8e537e4cf57aa092f0";
 const PM_REPO = "https://github.com/GeorgeDong32/pi-permission-modes";
@@ -71,6 +77,10 @@ const fixtures = resolveFixtures();
 for (const [label, dir] of Object.entries(fixtures)) {
 	assert(fs.existsSync(path.join(dir, "classifier-client.ts")), `${label} fixture has classifier-client.ts: ${dir}`);
 }
+// Exact fixture versions (M3). 2.7.0 is the fixed published control; 2.8.0 has
+// no npm release, so it must be the pinned commit.
+skipUnlessPackage("classifier baseUrl regression", "permission-modes 2.7.0 control", fixtures.pm270, PM_270_VERSION);
+skipUnlessPinnedPermissionModes("classifier baseUrl regression", fixtures.pm280);
 
 // --- fixtures --------------------------------------------------------------
 const agentDir = path.join(work, "home/.pi/agent");

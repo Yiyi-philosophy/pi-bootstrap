@@ -19,7 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { skipUnlessPi } from "./lib-pi.mjs";
+import { skipUnlessPi, skipUnlessPinnedPermissionModes } from "./lib-pi.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -52,13 +52,14 @@ function resolveSource() {
 	return target;
 }
 
-let require;
 const sourceDir = resolveSource();
 if (!sourceDir) {
 	console.log("SKIP permission gate: permission-modes 2.8.0 source not found (set PI_BOOTSTRAP_PM_280) or allow fetching with --fetch");
 	process.exit(77);
 }
 assert(fs.existsSync(path.join(sourceDir, "index.ts")), `source checkout has index.ts: ${sourceDir}`);
+// Exact provenance (M3): the pinned version and commit, not "some 2.8.0".
+skipUnlessPinnedPermissionModes("permission gate", sourceDir);
 
 const configPath = path.join(agentDir, "permission-modes.json");
 fs.writeFileSync(
@@ -97,7 +98,11 @@ for (const name of ["mode", "permissions", "classifier-model"]) {
 }
 console.log("PASS loader: permission-modes 2.8.0 plus classifier-model load on Pi " + pi.version);
 
-const permissionModes = loaded.extensions.find((extension) => extension.path.includes("permission-modes"));
+// Identify permission-modes by what it registers, not by where the checkout
+// happens to live: a PI_BOOTSTRAP_PM_280 checkout can have any directory name.
+const permissionModes = loaded.extensions.find(
+	(extension) => extension.commands.has("mode") && extension.commands.has("permissions"),
+);
 assert(permissionModes, "permission-modes extension is present");
 const gateHandlers = permissionModes.handlers.get("tool_call");
 assert(Array.isArray(gateHandlers) && gateHandlers.length >= 1, "tool_call gate handler registered");

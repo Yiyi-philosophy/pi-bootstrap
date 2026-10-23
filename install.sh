@@ -113,7 +113,6 @@ b9f642fe19dffd7f489bc7fceb64d7651b9a4795207d56f265ddf96806d5e9e5  utils.ts
 9e0ad94910a9e6938ba163ef354c748265ea25e2d44110ef3d26875ac297b55a  vitest.config.ts
 PM_MANIFEST
 )"
-
 # Packages this bootstrap manages: for each, the source it wants installed and
 # the Pi package identities that belong to it. Identities mirror Pi's own
 # matching (npm package name; git host/path without a ref), so an old npm
@@ -136,52 +135,152 @@ cleanup() {
 	fi
 }
 
-SETTINGS_SNAPSHOT=""
-SETTINGS_EXISTED=0
+# ---------------------------------------------------------------------------
+# Failure handling
+#
+# Rollback is driven entirely by the EXIT trap plus an on-disk journal, not by
+# an ERR trap. That is deliberate:
+#
+#   * Bash does not inherit an ERR trap into functions, command substitutions,
+#     or subshells unless `set -E` is on, so `trap ... ERR` silently misses the
+#     nested-call failures that matter most.
+#   * `set -e` does exit from any function or command substitution, and an EXIT
+#     trap installed in `main` runs in the process that owns the mutation, so
+#     every failure path (explicit `fail`, errexit, a signal) reaches the same
+#     recovery code exactly once.
+#   * SIGKILL and power loss cannot run any trap. Every destructive step is
+#     therefore preceded by an on-disk record (journal + immutable backups), so
+#     the next invocation restores the previous environment before doing
+#     anything else.
+#
+# The recovery code is idempotent and reads its instructions from the backup
+# directory, so the trap path and the after-crash path share one implementation.
+# ---------------------------------------------------------------------------
+RUN_PID=""
 MUTATION_STARTED=0
+RUN_COMMITTED=0
 RECOVERY_ACTIVE=0
-BACKED_UP_FILES=()
-CREATED_FILES=()
+FAIL_REPORTED=0
+BACKUP_DIR="$STATE_DIR/backup"
+JOURNAL="$STATE_DIR/transaction.env"
 
-# Restore the pre-run activation state. settings.json is what Pi loads, so
-# restoring it deactivates any partially installed version matrix.
-recover() {
-	((MUTATION_STARTED)) || return 0
-	((RECOVERY_ACTIVE)) && return 0
-	RECOVERY_ACTIVE=1
-	set +e
-	echo "pi-bootstrap: rolling back to the previous state..." >&2
-	if ((SETTINGS_EXISTED)); then
-		if cp -p "$SETTINGS_SNAPSHOT" "$SETTINGS_FILE"; then
-			echo "pi-bootstrap: restored $SETTINGS_FILE from $SETTINGS_SNAPSHOT" >&2
-		else
-			echo "pi-bootstrap: could not restore $SETTINGS_FILE; copy it back manually from $SETTINGS_SNAPSHOT" >&2
-		fi
-	else
-		rm -f "$SETTINGS_FILE"
-		echo "pi-bootstrap: removed $SETTINGS_FILE (it did not exist before this run)" >&2
-	fi
-	# Guarded expansions keep `set -u` happy on bash < 4.4, where an empty
-	# array under "${a[@]}" is an unbound-variable error.
-	for entry in ${BACKED_UP_FILES[@]+"${BACKED_UP_FILES[@]}"}; do
-		cp -p "${entry#*|}" "${entry%%|*}" ||
-			echo "pi-bootstrap: could not restore ${entry%%|*} from ${entry#*|}" >&2
-	done
-	for entry in ${CREATED_FILES[@]+"${CREATED_FILES[@]}"}; do
-		rm -f "$entry"
-	done
-	echo "pi-bootstrap: package files may remain under $AGENT_DIR; Pi only loads packages listed in settings.json, so nothing partial is active." >&2
-	echo "pi-bootstrap: fix the reported problem and re-run install.sh." >&2
-}
-
-fail() {
-	echo "pi-bootstrap: error: $*" >&2
-	recover
-	exit 1
+journal_write() {
+	local status="$1" phase="$2"
+	[[ -d "$STATE_DIR" ]] || return 0
+	{
+		printf 'status=%q\n' "$status"
+		printf 'phase=%q\n' "$phase"
+		printf 'agent_dir=%q\n' "$AGENT_DIR"
+		printf 'global_package=%q\n' "${GLOBAL_PI_PACKAGE:-}"
+		printf 'global_bin=%q\n' "${GLOBAL_PI_BIN:-}"
+		printf 'pid=%q\n' "$$"
+	} >"$JOURNAL.tmp" || return 0
+	mv -f "$JOURNAL.tmp" "$JOURNAL" || return 0
 }
 
 warn() {
 	echo "pi-bootstrap: warning: $*" >&2
+}
+
+fail() {
+	echo "pi-bootstrap: error: $*" >&2
+	FAIL_REPORTED=1
+	exit 1
+}
+
+# Test-only fault injection. Failure stages are documented in README.md and
+# exercised by scripts/tests/test-rollback.sh; an ordinary install never sets
+# this. The nested and pipeline stages exist to prove rollback does not depend
+# on an ERR trap being inherited into functions, command substitutions, or
+# pipelines.
+test_hook() {
+	local stage="$1"
+	[[ -n "${PI_BOOTSTRAP_TEST_FAIL_AT:-}" && "${PI_BOOTSTRAP_TEST_FAIL_AT}" == "$stage" ]] || return 0
+	case "$stage" in
+		nested)
+			# Called directly (not in a || list): errexit must end the run on its
+			# own, without an ERR trap, which is the property under test.
+			test_nested_failure
+			;;
+		pipeline)
+			test_pipeline_failure
+			;;
+		subshell)
+			test_subshell_failure
+			;;
+		sleep | after-remove-slow | after-install-slow | after-backup-slow)
+			# Not a failure: hold the run here so a test can deliver a signal.
+			echo "pi-bootstrap: test: pausing at stage '${stage}'" >&2
+			if [[ -n "${PI_BOOTSTRAP_TEST_SIGNAL:-}" ]]; then
+				# Deliver a real signal to this process (a signal test must not
+				# depend on the shell's job-control SIG_IGN behavior for
+				# background jobs).
+				kill -"${PI_BOOTSTRAP_TEST_SIGNAL}" "$BASHPID"
+				return 0
+			fi
+			# Background sleep + wait so the shell handles a signal immediately;
+			# a foreground `sleep` defers trap handling until it returns.
+			sleep "${PI_BOOTSTRAP_TEST_SLEEP:-5}" &
+			wait $! 2>/dev/null || true
+			;;
+		*)
+			fail "injected failure at stage '${stage}' (PI_BOOTSTRAP_TEST_FAIL_AT)"
+			;;
+	esac
+}
+
+test_nested_failure() {
+	# A failing command inside a nested function reached through a command
+	# substitution: the classic case a non-errtrace ERR trap misses.
+	test_inner_failure() {
+		echo "partial output"
+		return 7
+	}
+	test_outer_failure() {
+		local captured
+		captured="$(test_inner_failure)"
+		echo "unreachable: ${captured}"
+	}
+	test_outer_failure
+}
+
+test_pipeline_failure() {
+	# pipefail makes the pipeline fail even though the last stage succeeds.
+	printf 'x\n' | grep -q 'definitely-absent' | cat
+}
+
+test_subshell_failure() {
+	( exit 9 )
+}
+
+on_signal() {
+	local name="$1" number="$2"
+	echo "pi-bootstrap: received SIG${name}; rolling back" >&2
+	# A second signal during rollback keeps the default (terminating) behavior:
+	# the journal and backups remain, and the next run recovers from them.
+	trap - INT TERM HUP
+	exit $((128 + number))
+}
+
+on_exit() {
+	local status=$?
+	trap - EXIT INT TERM HUP ERR
+	if [[ -n "$RUN_PID" && "$BASHPID" != "$RUN_PID" ]]; then
+		# A subshell inherited the trap. The process that owns the transaction
+		# performs recovery; this one only cleans up its own temporary files.
+		cleanup
+		exit "$status"
+	fi
+	if ((MUTATION_STARTED && !RUN_COMMITTED)); then
+		if ((!FAIL_REPORTED && status == 0)); then
+			echo "pi-bootstrap: error: install exited before completing" >&2
+		elif ((!FAIL_REPORTED)); then
+			echo "pi-bootstrap: error: unexpected failure (exit ${status})" >&2
+		fi
+		recover
+	fi
+	cleanup
+	exit "$status"
 }
 
 require_command() {
@@ -196,6 +295,17 @@ hash_file() {
 	else
 		fail "checksum verification requires sha256sum or shasum"
 	fi
+}
+
+# Move a path, falling back to copy+delete when source and destination are on
+# different filesystems (a staging prefix under TMPDIR often is).
+move_path() {
+	local src="$1" dst="$2"
+	if mv -f "$src" "$dst" 2>/dev/null; then
+		return 0
+	fi
+	cp -a "$src" "$dst" || return 1
+	rm -rf "$src" || return 1
 }
 
 require_node_version() {
@@ -407,6 +517,7 @@ check_settings() {
 # Remove managed entries that do not match the pinned matrix. Entries for other
 # packages are never touched; `pi remove` failing is fatal (Pi deletes files
 # before checking settings, so a silent failure could leave a broken install).
+# The files `pi remove` deletes are already snapshotted by begin_transaction().
 migrate_managed_packages() {
 	local value
 	read_settings_plan plan || fail "could not inspect $SETTINGS_FILE"
@@ -415,9 +526,10 @@ migrate_managed_packages() {
 	for value in ${PLAN_FINDINGS[@]+"${PLAN_FINDINGS[@]}"}; do
 		echo "Removing stale package entry: ${value}"
 		if ! "$PI_BIN" remove "$value"; then
-			fail "pi remove failed for ${value}; $SETTINGS_FILE may be unchanged, but Pi may already have deleted the package files"
+			fail "pi remove failed for ${value}; Pi may already have deleted the package files"
 		fi
 	done
+	test_hook after-remove
 
 	read_settings_plan plan || fail "could not re-inspect $SETTINGS_FILE after removal"
 	if ((${#PLAN_FINDINGS[@]})); then
@@ -502,6 +614,7 @@ prepare_permission_modes_snapshot() {
 # packages ship prebuilt, so no build step is lost.
 install_managed_packages() {
 	export npm_config_ignore_scripts=1
+	test_hook after-remove-slow
 
 	echo "Installing default Pi extensions..."
 	"$PI_BIN" install "$PI_BTW_SOURCE" || fail "could not install $PI_BTW_SOURCE"
@@ -510,51 +623,802 @@ install_managed_packages() {
 	echo "Installing permission-modes ${PERMISSION_MODES_VERSION} from pinned upstream commit ${PERMISSION_MODES_COMMIT:0:12}..."
 	echo "(source built from the pinned commit, not an official npm release; SHA256-verified)"
 	"$PI_BIN" install "$PERMISSION_MODES_SOURCE" || fail "could not install $PERMISSION_MODES_SOURCE"
+	test_hook after-install
+	test_hook after-install-slow
 }
 
-locate_pi_bin() {
-	if [[ -n "${PI_BIN:-}" && -x "${PI_BIN:-}" ]]; then
-		export PI_CODING_AGENT_DIR="$AGENT_DIR"
-		return 0
+# ---------------------------------------------------------------------------
+# Global Pi CLI: staged install, non-destructive activation
+#
+# `npm install -g` writes into the live prefix, so a failure mid-install could
+# leave a broken `pi` behind. Instead the package is installed into a throwaway
+# prefix, verified, and only then activated by moving the old package aside and
+# the new one into place (same filesystem => rename, not copy). Recovery moves
+# the old package back and restores the bin link byte-for-byte.
+# ---------------------------------------------------------------------------
+resolve_global_paths() {
+	GLOBAL_NPM_PREFIX="$(npm prefix -g 2>/dev/null | tr -d '\r' | tail -n 1)" || GLOBAL_NPM_PREFIX=""
+	GLOBAL_NPM_ROOT="$(npm root -g 2>/dev/null | tr -d '\r' | tail -n 1)" || GLOBAL_NPM_ROOT=""
+	# Some npm configurations (and the test stub) answer only one of the two;
+	# each is derivable from the other for a standard prefix layout.
+	if [[ -z "$GLOBAL_NPM_PREFIX" && -n "$GLOBAL_NPM_ROOT" ]]; then
+		GLOBAL_NPM_PREFIX="$(dirname "$(dirname "$GLOBAL_NPM_ROOT")")"
 	fi
-	PI_BIN="$(command -v pi || true)"
-	if [[ -z "$PI_BIN" ]]; then
-		local global_bin
-		global_bin="$(npm prefix -g)/bin"
-		if [[ -x "$global_bin/pi" ]]; then
-			PI_BIN="$global_bin/pi"
+	if [[ -z "$GLOBAL_NPM_ROOT" && -n "$GLOBAL_NPM_PREFIX" && -n "${GLOBAL_PI_PACKAGE:-}" ]]; then
+		GLOBAL_NPM_ROOT="$(dirname "$(dirname "$GLOBAL_PI_PACKAGE")")"
+	fi
+	if [[ -z "$GLOBAL_NPM_ROOT" && -n "$GLOBAL_NPM_PREFIX" ]]; then
+		GLOBAL_NPM_ROOT="$GLOBAL_NPM_PREFIX/lib/node_modules"
+	fi
+	[[ -n "$GLOBAL_NPM_ROOT" ]] || fail "could not determine the npm global root (npm root -g / npm prefix -g)"
+	[[ -n "$GLOBAL_NPM_PREFIX" ]] || fail "could not determine the npm global prefix (npm prefix -g)"
+	GLOBAL_PI_PACKAGE="$GLOBAL_NPM_ROOT/@earendil-works/pi-coding-agent"
+	GLOBAL_PI_BIN="$GLOBAL_NPM_PREFIX/bin/pi"
+}
+
+read_package_version() {
+	local manifest="$1"
+	node -e 'try { const m = require(process.argv[1]); process.stdout.write(String(m.version || "")); } catch { process.exit(1); }' "$manifest" 2>/dev/null
+}
+
+install_pi_cli_staged() {
+	local stage staged_pkg staged_version cli_rel bin_target
+	stage="$(mktemp -d)"
+	tmp_files+=("$stage")
+
+	resolve_global_paths
+
+	echo "Installing Pi Coding Agent ${PI_VERSION} into a staging prefix..."
+	npm install -g --ignore-scripts --prefix "$stage" "@earendil-works/pi-coding-agent@${PI_VERSION}" ||
+		fail "npm could not stage Pi ${PI_VERSION}"
+	staged_pkg="$stage/lib/node_modules/@earendil-works/pi-coding-agent"
+	[[ -f "$staged_pkg/package.json" ]] || fail "the staged Pi install has no package.json (looked in $staged_pkg)"
+	staged_version="$(read_package_version "$staged_pkg/package.json")" ||
+		fail "could not read the staged Pi version"
+	[[ "$staged_version" == "$PI_VERSION" ]] ||
+		fail "staged Pi is version ${staged_version}, expected ${PI_VERSION}"
+
+	cli_rel="$(node -e '
+		const fs = require("node:fs");
+		const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+		const bin = typeof manifest.bin === "string" ? manifest.bin : manifest.bin && manifest.bin.pi;
+		if (!bin) process.exit(1);
+		process.stdout.write(bin);
+	' "$staged_pkg/package.json")" || fail "the staged Pi package declares no pi bin entry"
+	[[ -f "$staged_pkg/$cli_rel" ]] || fail "the staged Pi CLI entry point is missing: $staged_pkg/$cli_rel"
+
+	mkdir -p "$BACKUP_DIR/cli" || fail "could not create $BACKUP_DIR/cli"
+	if [[ -e "$GLOBAL_PI_PACKAGE" ]]; then
+		move_path "$GLOBAL_PI_PACKAGE" "$BACKUP_DIR/cli/package" ||
+			fail "could not move the existing Pi package aside ($GLOBAL_PI_PACKAGE)"
+		: >"$BACKUP_DIR/cli/package.existed"
+	fi
+	if [[ -e "$GLOBAL_PI_BIN" || -L "$GLOBAL_PI_BIN" ]]; then
+		local old_target
+		: >"$BACKUP_DIR/cli/bin.existed"
+		if [[ -L "$GLOBAL_PI_BIN" ]]; then
+			old_target="$(readlink "$GLOBAL_PI_BIN" 2>/dev/null || true)"
+			[[ -z "$old_target" ]] || printf '%s\n' "$old_target" >"$BACKUP_DIR/cli/bin-target"
+			rm -f "$BACKUP_DIR/cli/bin-file"
 		else
-			fail "Pi was installed but the pi command could not be found"
+			# npm normally links the bin entry, but a plain wrapper script is a
+			# legitimate global install shape and must be restored byte-for-byte.
+			cp -p "$GLOBAL_PI_BIN" "$BACKUP_DIR/cli/bin-file" ||
+				fail "could not back up $GLOBAL_PI_BIN"
+			rm -f "$BACKUP_DIR/cli/bin-target"
 		fi
+	else
+		rm -f "$BACKUP_DIR/cli/bin-target" "$BACKUP_DIR/cli/bin.existed" "$BACKUP_DIR/cli/bin-file"
 	fi
-	# Keep `pi install` writing to the same agent directory the checks read.
-	export PI_CODING_AGENT_DIR="$AGENT_DIR"
+	journal_write active activated-cli
+
+	mkdir -p "$(dirname "$GLOBAL_PI_PACKAGE")" "$GLOBAL_NPM_PREFIX/bin" ||
+		fail "could not create the npm global directories"
+	move_path "$staged_pkg" "$GLOBAL_PI_PACKAGE" || fail "could not activate the staged Pi package"
+	bin_target="$(node -e '
+		const path = require("node:path");
+		process.stdout.write(path.relative(process.argv[1], process.argv[2]));
+	' "$GLOBAL_NPM_PREFIX/bin" "$GLOBAL_PI_PACKAGE/$cli_rel")" || fail "could not compute the pi bin link target"
+	ln -sfn "$bin_target" "$GLOBAL_PI_BIN" || fail "could not create the pi bin link at $GLOBAL_PI_BIN"
+
+	PI_BIN="$GLOBAL_PI_BIN"
+	verify_pi_version "$PI_BIN"
+	test_hook after-pi-install
+}
+
+verify_pi_version() {
+	local bin="$1" output version
+	output="$("$bin" --version 2>/dev/null | tr -d '\r')" ||
+		fail "could not read the installed Pi version from $bin"
+	version="${output##* }"
+	[[ "$version" == "$PI_VERSION" ]] ||
+		fail "Pi ${version:-unknown} is installed at $bin, expected exactly ${PI_VERSION}"
+}
+
+# The pinned npm packages and the pinned source must be the versions the matrix
+# names, not merely "some version that loads".
+verify_installed_versions() {
+	local btw_manifest advisor_manifest pm_manifest installed minimal_hash
+	btw_manifest="$AGENT_DIR/npm/node_modules/@narumitw/pi-btw/package.json"
+	advisor_manifest="$AGENT_DIR/npm/node_modules/pi-advisor-flow/package.json"
+	pm_manifest="$PERMISSION_MODES_DIR/package.json"
+
+	local name path expected actual
+	while read -r name path expected; do
+		[[ -f "$path" ]] || fail "${name} is not installed at ${path}"
+		actual="$(read_package_version "$path")" || fail "could not read the version of ${name}"
+		[[ "$actual" == "$expected" ]] ||
+			fail "${name} ${actual} is installed, expected exactly ${expected}"
+	done <<VERSIONS
+pi-btw ${btw_manifest} ${PI_BTW_VERSION}
+pi-advisor-flow ${advisor_manifest} ${PI_ADVISOR_FLOW_VERSION}
+permission-modes ${pm_manifest} ${PERMISSION_MODES_VERSION}
+VERSIONS
+
+	installed="$EXTENSIONS_DIR/minimal-mode.ts"
+	[[ -f "$installed" ]] || fail "minimal-mode.ts is not installed at ${installed}"
+	minimal_hash="$(hash_file "$installed")"
+	[[ "$minimal_hash" == "$MINIMAL_MODE_SHA256" ]] ||
+		fail "installed minimal-mode.ts does not match the pinned checksum"
+}
+
+# ---------------------------------------------------------------------------
+# Real-runtime verification (embedded copy of scripts/lib/verify-stack.mjs)
+# ---------------------------------------------------------------------------
+VERIFY_STACK_JS=""
+materialize_verify_stack() {
+	local dir
+	dir="$(mktemp -d)"
+	tmp_files+=("$dir")
+	# Node picks the module type from the extension, so the file must keep .mjs.
+	VERIFY_STACK_JS="$dir/verify-stack.mjs"
+	cat >"$VERIFY_STACK_JS" <<'VERIFY_STACK_JS_BODY'
+#!/usr/bin/env node
+// Load the managed stack through the REAL Pi extension loader.
+//
+// The installer embeds this file (see install.sh, VERIFY_STACK_JS) so that a
+// `curl | bash` install can verify its own result without a checkout. It is
+// used in two ways:
+//
+//   capture  before a mutation: record the Pi version and the commands the
+//            current installation actually registers.
+//   verify   after a rollback (or at the end of a successful install): prove
+//            that Pi and the managed packages still load and that the recorded
+//            commands are registered again.
+//
+// Only packages this bootstrap manages are loaded, plus the two extension files
+// it writes. Unrelated user packages are never executed by this check.
+//
+// Paired copy: the same source lives in scripts/lib/verify-stack.mjs;
+// scripts/check-embedded-extension.sh keeps the two byte-identical.
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const PI_PACKAGE = "@earendil-works/pi-coding-agent";
+
+// Identities this bootstrap manages. Mirrors managed_spec() in install.sh.
+const MANAGED = [
+	"npm:@narumitw/pi-btw",
+	"npm:pi-advisor-flow",
+	"npm:@georgedong32/permission-modes",
+	"git:github.com/GeorgeDong32/pi-permission-modes",
+];
+
+const EXTENSION_FILES = ["classifier-model.ts", "minimal-mode.ts"];
+
+function usage(message) {
+	if (message) console.error(message);
+	console.error(
+		"usage: verify-stack.mjs --pi-bin <path> --agent-dir <dir> [--mode capture|verify] [--expect <file>] [--json-out <file>] [--require-command <name>]",
+	);
+	process.exit(2);
+}
+
+function parseArgs(argv) {
+	const options = { mode: "capture", expectFrom: undefined, jsonOut: undefined, requireCommands: [] };
+	for (let i = 0; i < argv.length; i += 1) {
+		const flag = argv[i];
+		const value = argv[i + 1];
+		switch (flag) {
+			case "--mode":
+				if (value !== "capture" && value !== "verify") usage(`--mode must be capture or verify, got ${value}`);
+				options.mode = value;
+				i += 1;
+				break;
+			case "--pi-bin":
+				options.piBin = value;
+				i += 1;
+				break;
+			case "--agent-dir":
+				options.agentDir = value;
+				i += 1;
+				break;
+			case "--expect":
+				options.mode = "verify";
+				options.expectFrom = value;
+				i += 1;
+				break;
+			case "--require-command":
+				if (!value) usage("--require-command needs a command name");
+				options.requireCommands.push(value);
+				i += 1;
+				break;
+			case "--json-out":
+				options.jsonOut = value;
+				i += 1;
+				break;
+			default:
+				usage(`unknown argument: ${flag}`);
+		}
+	}
+	if (!options.piBin || !options.agentDir) usage("--pi-bin and --agent-dir are required");
+	return options;
+}
+
+// Resolve the Pi package directory from the CLI path npm created for it. The
+// bin entry is a symlink into the package, so walk up until the manifest that
+// belongs to this package is found.
+function resolvePiPackage(piBin) {
+	let current;
+	try {
+		current = fs.realpathSync(piBin);
+	} catch {
+		return undefined;
+	}
+	if (fs.statSync(current).isDirectory()) current = path.join(current, "package.json");
+	for (;;) {
+		const manifestPath = path.join(current, "package.json");
+		if (fs.existsSync(manifestPath)) {
+			try {
+				const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+				if (manifest.name === PI_PACKAGE) return { dir: current, version: manifest.version, manifest };
+			} catch {
+				// unreadable manifest: keep walking
+			}
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+function identity(source) {
+	if (typeof source !== "string" || source.length === 0) return undefined;
+	if (source.startsWith("npm:")) {
+		const match = source.slice(4).trim().match(/^(@?[^@]+(?:\/[^@]+)?)(?:@(.+))?$/);
+		return match && match[1] ? `npm:${match[1]}` : undefined;
+	}
+	let url = source.startsWith("git:") ? source.slice(4).trim() : source;
+	let host;
+	let packagePath;
+	const scp = url.match(/^git@([^:]+):(.+)$/);
+	if (scp) {
+		host = scp[1];
+		packagePath = scp[2];
+	} else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+		try {
+			const parsed = new URL(url);
+			host = parsed.hostname;
+			packagePath = parsed.pathname.replace(/^\/+/, "");
+		} catch {
+			return undefined;
+		}
+	} else {
+		const slash = url.indexOf("/");
+		if (slash < 0) return undefined;
+		host = url.slice(0, slash);
+		packagePath = url.slice(slash + 1);
+		if (!host.includes(".") && host !== "localhost") return undefined;
+	}
+	const separator = packagePath.search(/[@#]/);
+	if (separator >= 0) packagePath = packagePath.slice(0, separator);
+	packagePath = packagePath.replace(/^\/+/, "").replace(/\.git$/, "");
+	if (!host || !packagePath) return undefined;
+	return `git:${host}/${packagePath}`;
+}
+
+function installPath(agentDir, id) {
+	if (id.startsWith("npm:")) return path.join(agentDir, "npm", "node_modules", id.slice(4));
+	return path.join(agentDir, "git", id.slice(4));
+}
+
+function readJson(file) {
+	try {
+		return JSON.parse(fs.readFileSync(file, "utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
+// Entry points declared by a package manifest ("pi.extensions"), else index.ts
+// / index.js, matching Pi's own resolveExtensionEntries().
+function packageEntries(dir) {
+	const manifest = readJson(path.join(dir, "package.json"));
+	const declared = manifest?.pi?.extensions;
+	if (Array.isArray(declared) && declared.length > 0) return declared.map((entry) => path.join(dir, entry));
+	for (const candidate of ["index.ts", "index.js"]) {
+		const full = path.join(dir, candidate);
+		if (fs.existsSync(full)) return [full];
+	}
+	return [];
+}
+
+function describeSource(agentDir, id) {
+	const dir = installPath(agentDir, id);
+	const manifest = readJson(path.join(dir, "package.json"));
+	const info = { id, path: dir, version: manifest?.version, present: fs.existsSync(dir) };
+	if (manifest?.name) info.name = manifest.name;
+	return info;
+}
+
+const options = parseArgs(process.argv.slice(2));
+const pi = resolvePiPackage(options.piBin);
+if (!pi) {
+	const payload = {
+		ok: true,
+		skipped: true,
+		reason: `could not resolve the ${PI_PACKAGE} package from ${options.piBin}`,
+	};
+	if (options.jsonOut) fs.writeFileSync(options.jsonOut, `${JSON.stringify(payload, null, 2)}\n`);
+	console.log(`SKIP stack verification: ${payload.reason}`);
+	// 3 = "nothing could be verified". Distinct from PASS (0) so a caller can
+	// never mistake an unproven environment for a working one.
+	process.exit(3);
+}
+
+const agentDir = path.resolve(options.agentDir);
+const settings = readJson(path.join(agentDir, "settings.json")) ?? {};
+const configured = new Map();
+for (const entry of Array.isArray(settings.packages) ? settings.packages : []) {
+	const source = typeof entry === "string" ? entry : entry && entry.source;
+	const id = identity(source);
+	if (id && MANAGED.includes(id) && !configured.has(id)) configured.set(id, source);
+}
+
+const packages = [];
+const entryFiles = [];
+for (const [id, source] of configured) {
+	const info = describeSource(agentDir, id);
+	info.source = source;
+	if (info.present) {
+		const entries = packageEntries(info.path);
+		info.entries = entries;
+		if (entries.length === 0) info.error = "no extension entry point";
+		for (const entry of entries) entryFiles.push(entry);
+	} else {
+		info.error = "installed directory is missing";
+	}
+	packages.push(info);
+}
+
+const extensions = [];
+for (const file of EXTENSION_FILES) {
+	const full = path.join(agentDir, "extensions", file);
+	if (fs.existsSync(full)) {
+		extensions.push(full);
+		entryFiles.push(full);
+	}
+}
+
+const workDir = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "pi-bootstrap-verify."));
+process.env.PI_OFFLINE = "1";
+process.env.PI_SKIP_VERSION_CHECK = "1";
+process.env.PI_CODING_AGENT_DIR = agentDir;
+
+let loaded;
+let loadError;
+let skipped = false;
+try {
+	const loaderPath = path.join(pi.dir, "dist", "core", "extensions", "loader.js");
+	if (!fs.existsSync(loaderPath)) {
+		skipped = true;
+		loadError = `Pi ${pi.version} at ${pi.dir} has no extension loader (${loaderPath})`;
+		throw new Error(loadError);
+	}
+	const { loadExtensions, createExtensionRuntime } = await import(pathToFileURL(loaderPath).href);
+	const runtime = createExtensionRuntime();
+	for (const method of ["sendMessage", "sendUserMessage", "appendEntry", "setSessionName", "setLabel", "setActiveTools"]) {
+		if (typeof runtime[method] === "function") runtime[method] = () => undefined;
+	}
+	runtime.getSessionName = () => "pi-bootstrap-verify";
+	runtime.getSettings = () => ({});
+	runtime.getActiveTools = runtime.getAllTools = () => [];
+	loaded = await loadExtensions(entryFiles, workDir, undefined, runtime);
+} catch (error) {
+	loadError = error instanceof Error ? error.message : String(error);
+} finally {
+	fs.rmSync(workDir, { recursive: true, force: true });
+}
+
+const commands = loaded
+	? [...new Set(loaded.extensions.flatMap((extension) => [...extension.commands].map(([name]) => name)))].sort()
+	: [];
+const permissionGate = loaded
+	? loaded.extensions.some((extension) => extension.path.includes("permission-modes") && (extension.handlers.get("tool_call")?.length ?? 0) > 0)
+	: false;
+
+const payload = {
+	ok: false,
+	piVersion: pi.version,
+	piDir: pi.dir,
+	packages,
+	extensions,
+	extensionCount: loaded?.extensions.length ?? 0,
+	errors: loaded?.errors ?? [],
+	commands,
+	permissionGate,
+	loadError,
+	skipped,
+};
+
+if (options.mode === "verify") {
+	const problems = [];
+	const expected = readJson(options.expectFrom);
+	if (!expected) {
+		problems.push(`cannot read the recorded pre-install state from ${options.expectFrom}`);
+	} else {
+		if (expected.skipped || expected.ok === false) {
+			// The pre-run environment could not be inspected (for example a stub
+			// `pi` in the test suite). A rollback can then only prove that what is
+			// there now loads; it cannot compare command lists.
+			payload.previousStateUnavailable = true;
+		} else {
+			if (expected.piVersion && expected.piVersion !== pi.version) {
+				problems.push(`Pi is ${pi.version} after rollback, expected ${expected.piVersion}`);
+			}
+			for (const name of expected.commands ?? []) {
+				if (!commands.includes(name)) problems.push(`command ${name} is not registered after rollback`);
+			}
+			for (const pkg of expected.packages ?? []) {
+				const now = packages.find((info) => info.id === pkg.id);
+				if (!now) {
+					problems.push(`${pkg.id} was installed before the run and is not configured now`);
+					continue;
+				}
+				if (now.version !== pkg.version) {
+					problems.push(`${pkg.id} is ${now.version ?? "missing"} after rollback, expected ${pkg.version}`);
+				}
+			}
+		}
+	}
+	if (loadError && !skipped) problems.push(`loader error: ${loadError}`);
+	for (const error of loaded?.errors ?? []) problems.push(`${error.path}: ${error.error}`);
+	for (const info of packages) if (info.error) problems.push(`${info.id}: ${info.error}`);
+	if ((expected?.permissionGate ?? false) && !permissionGate) problems.push("permission-modes tool_call gate is not registered");
+	payload.problems = problems;
+	payload.ok = problems.length === 0;
+} else {
+	const problems = [];
+	if (!loaded) problems.push(loadError ?? "extensions could not be loaded");
+	for (const error of payload.errors) problems.push(`${error.path}: ${error.error}`);
+	for (const info of packages) if (info.error) problems.push(`${info.id}: ${info.error}`);
+	for (const name of options.requireCommands) {
+		if (!commands.includes(name)) problems.push(`command ${name} is not registered`);
+	}
+	payload.requiredCommands = options.requireCommands;
+	payload.problems = problems;
+	payload.ok = problems.length === 0;
+}
+
+if (options.jsonOut) fs.writeFileSync(options.jsonOut, `${JSON.stringify(payload, null, 2)}\n`);
+
+if (skipped) {
+	// A stub `pi` (the installer's own test suite) or a Pi build without a
+	// loader: nothing can be proven either way, so say so instead of guessing.
+	console.log(`SKIP stack verification: ${loadError}`);
+	process.exit(3);
+}
+
+const summary = `Pi ${pi.version}; ${payload.extensionCount} extension(s); ${commands.length} command(s)${
+	packages.length ? `; packages ${packages.map((info) => `${info.id}@${info.version ?? "?"}`).join(", ")}` : ""
+}`;
+if (payload.ok) {
+	console.log(`stack verification OK: ${summary}`);
+	process.exit(0);
+}
+console.error(`stack verification FAILED: ${summary}`);
+for (const problem of payload.problems ?? []) console.error(`  - ${problem}`);
+for (const error of payload.errors ?? []) console.error(`  - ${error.path}: ${error.error}`);
+if (loadError) console.error(`  - ${loadError}`);
+for (const info of packages) if (info.error) console.error(`  - ${info.id}: ${info.error}`);
+process.exit(1);
+VERIFY_STACK_JS_BODY
+}
+
+# Run the real Pi launcher against the managed stack. Never loads unrelated
+# user packages. Returns non-zero when the stack does not load.
+verify_stack() {
+	local mode="$1"
+	shift
+	node "$VERIFY_STACK_JS" --mode "$mode" --pi-bin "$PI_BIN" --agent-dir "$AGENT_DIR" "$@"
+}
+
+verify_installed_stack() {
+	local status=0
+	verify_stack capture --json-out "$STATE_DIR/stack.json" \
+		--require-command mode --require-command permissions \
+		--require-command classifier-model \
+		--require-command btw --require-command advisor --require-command advisor-models || status=$?
+	case "$status" in
+		0) : ;;
+		3)
+			# Nothing could be proven: the resolved pi package has no extension
+			# loader (only possible with a stub or a non-standard Pi build). A real
+			# install must not pretend that is verified; the test suite opts in
+			# explicitly, and its own acceptance test covers this branch.
+			if [[ "${PI_BOOTSTRAP_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
+				warn "the installed stack could not be verified on this Pi build (PI_BOOTSTRAP_ALLOW_UNVERIFIED=1)"
+			else
+				fail "could not verify the installed stack: the pi package at ${GLOBAL_PI_PACKAGE:-unknown} has no extension loader"
+			fi
+			;;
+		*) fail "the installed stack does not load on the installed Pi (see the errors above)" ;;
+	esac
+}
+
+locate_current_pi() {
+	PI_BIN="$(command -v pi 2>/dev/null || true)"
+	if [[ -z "$PI_BIN" ]] && [[ -n "${GLOBAL_PI_BIN:-}" ]] && [[ -x "$GLOBAL_PI_BIN" ]]; then
+		PI_BIN="$GLOBAL_PI_BIN"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# Backups / rollback
+# ---------------------------------------------------------------------------
+backup_record_file() {
+	local target="$1" entry stored
+	[[ -d "$BACKUP_DIR/files" ]] || mkdir -p "$BACKUP_DIR/files" || fail "could not create $BACKUP_DIR/files"
+	[[ -f "$BACKUP_DIR/files.tsv" ]] || : >"$BACKUP_DIR/files.tsv" || fail "could not create $BACKUP_DIR/files.tsv"
+	entry="$(wc -l <"$BACKUP_DIR/files.tsv" | tr -d ' ')"
+	stored="$(printf '%03d-%s' "$((entry + 1))" "$(basename "$target")")"
+	cp -p "$target" "$BACKUP_DIR/files/$stored" || fail "could not back up $target"
+	printf '%s\t%s\n' "$target" "$stored" >>"$BACKUP_DIR/files.tsv" || fail "could not record the backup of $target"
+}
+
+# Remember the previous contents of a file so a failure can restore it, or so a
+# newly created file can be removed. Recorded on disk immediately, which is what
+# makes recovery work after SIGKILL as well as after a trap.
+track_install_target() {
+	local target="$1"
+	if [[ ! -d "$BACKUP_DIR" ]]; then
+		mkdir -p "$BACKUP_DIR" || fail "could not create $BACKUP_DIR"
+	fi
+	if [[ -f "$target" ]]; then
+		backup_record_file "$target"
+	else
+		printf '%s\n' "$target" >>"$BACKUP_DIR/created.list" || fail "could not record $target as created"
+	fi
 }
 
 snapshot_settings() {
-	mkdir -p "$STATE_DIR" || fail "could not create $STATE_DIR"
-	SETTINGS_SNAPSHOT="$STATE_DIR/settings.json.snapshot"
 	if [[ -f "$SETTINGS_FILE" ]]; then
-		cp -p "$SETTINGS_FILE" "$SETTINGS_SNAPSHOT" || fail "could not back up $SETTINGS_FILE"
-		SETTINGS_EXISTED=1
+		cp -p "$SETTINGS_FILE" "$BACKUP_DIR/settings.json" || fail "could not back up $SETTINGS_FILE"
+		: >"$BACKUP_DIR/settings.existed"
 	else
-		rm -f "$SETTINGS_SNAPSHOT"
-		SETTINGS_EXISTED=0
+		: >"$BACKUP_DIR/settings.absent"
 	fi
 }
 
-# Remember the previous contents of an installed file so a failure can restore
-# it, or so a newly created file can be removed.
-track_install_target() {
-	local target="$1" backup
-	if [[ -f "$target" ]]; then
-		backup="$STATE_DIR/backup/$(basename "$target")"
-		mkdir -p "$STATE_DIR/backup" || fail "could not create $STATE_DIR/backup"
-		cp -p "$target" "$backup" || fail "could not back up $target"
-		BACKED_UP_FILES+=("$target|$backup")
-	else
-		CREATED_FILES+=("$target")
+# Move each managed package tree aside and work on a copy. The moved tree is the
+# authoritative backup, so restoring it cannot be corrupted by the run itself
+# (including a run that `pi remove` partially destroyed).
+snapshot_plugin_trees() {
+	local tree src
+	for tree in npm git; do
+		src="$AGENT_DIR/$tree"
+		if [[ -e "$src" ]]; then
+			mkdir -p "$BACKUP_DIR/trees" || fail "could not create $BACKUP_DIR/trees"
+			move_path "$src" "$BACKUP_DIR/trees/$tree" ||
+				fail "could not move $src aside for rollback"
+			cp -a "$BACKUP_DIR/trees/$tree" "$src" || fail "could not working-copy $src back into place"
+		else
+			printf '%s\n' "$src" >>"$BACKUP_DIR/created.list" || fail "could not record $src as created"
+		fi
+	done
+}
+
+# Capture what the current environment registers, so a rollback can prove the
+# old commands are back rather than merely that files match bytes.
+capture_pre_state() {
+	local pre_state="$BACKUP_DIR/pre-state.json"
+	if [[ -z "${PI_BIN:-}" ]]; then
+		printf '{"skipped": true, "reason": "no Pi launcher was available before the upgrade"}\n' >"$pre_state"
+		return 0
 	fi
+	verify_stack capture --json-out "$pre_state" >/dev/null 2>&1 || true
+	[[ -f "$pre_state" ]] || printf '{"skipped": true, "reason": "pre-install stack capture failed"}\n' >"$pre_state"
+}
+
+begin_transaction() {
+	if [[ -e "$BACKUP_DIR" ]]; then
+		fail "a previous rollback is still pending at $BACKUP_DIR; resolve it before running the installer again (see the messages from the failed run)"
+	fi
+	mkdir -p "$BACKUP_DIR" || fail "could not create $BACKUP_DIR"
+	journal_write active backup
+	MUTATION_STARTED=1
+	capture_pre_state
+	snapshot_settings
+	snapshot_plugin_trees
+	test_hook after-backup
+	test_hook after-backup-slow
+}
+
+# Restore everything the journal and backup directory describe. Idempotent:
+# every step checks what is actually present, so it is safe after a partial
+# crash as well as after a trap.
+restore_from_backup() {
+	local manifest original stored created tree old_target
+
+	# Files the run replaced, then files the run created.
+	if [[ -f "$BACKUP_DIR/files.tsv" ]]; then
+		while IFS=$'\t' read -r original stored; do
+			[[ -n "$original" && -n "$stored" ]] || continue
+			if [[ -f "$BACKUP_DIR/files/$stored" ]]; then
+				mkdir -p "$(dirname "$original")" || true
+				cp -p "$BACKUP_DIR/files/$stored" "$original" ||
+					echo "pi-bootstrap: could not restore ${original} from ${BACKUP_DIR}/files/${stored}" >&2
+			fi
+		done <"$BACKUP_DIR/files.tsv"
+	fi
+	if [[ -f "$BACKUP_DIR/created.list" ]]; then
+		while IFS= read -r created; do
+			[[ -n "$created" ]] || continue
+			case "$created" in
+				"$AGENT_DIR/npm" | "$AGENT_DIR/git") continue ;; # handled as trees below
+			esac
+			rm -f "$created" || echo "pi-bootstrap: could not remove ${created}; it did not exist before this run" >&2
+		done <"$BACKUP_DIR/created.list"
+	fi
+
+	# settings.json is what Pi loads; restoring it deactivates a partial matrix.
+	if [[ -f "$BACKUP_DIR/settings.json" ]]; then
+		cp -p "$BACKUP_DIR/settings.json" "$SETTINGS_FILE" &&
+			echo "pi-bootstrap: restored $SETTINGS_FILE" >&2 ||
+			echo "pi-bootstrap: could not restore $SETTINGS_FILE; copy it back from $BACKUP_DIR/settings.json" >&2
+	elif [[ -f "$BACKUP_DIR/settings.absent" ]]; then
+		rm -f "$SETTINGS_FILE"
+	fi
+
+	# Package trees: drop the working copy, move the untouched original back. A
+	# tree the run created did not exist before and is removed entirely.
+	for tree in npm git; do
+		if [[ -d "$BACKUP_DIR/trees/$tree" ]]; then
+			rm -rf "${AGENT_DIR:?}/$tree" || echo "pi-bootstrap: could not clear $AGENT_DIR/$tree" >&2
+			move_path "$BACKUP_DIR/trees/$tree" "$AGENT_DIR/$tree" ||
+				echo "pi-bootstrap: could not restore $AGENT_DIR/$tree from $BACKUP_DIR/trees/$tree" >&2
+		elif [[ -f "$BACKUP_DIR/created.list" ]] && grep -Fxq "$AGENT_DIR/$tree" "$BACKUP_DIR/created.list"; then
+			rm -rf "${AGENT_DIR:?}/$tree" || echo "pi-bootstrap: could not remove $AGENT_DIR/$tree; it did not exist before this run" >&2
+		fi
+	done
+
+	# Global Pi CLI.
+	if [[ -f "$BACKUP_DIR/cli/package.existed" ]] && [[ -d "$BACKUP_DIR/cli/package" ]]; then
+		local package_path="${GLOBAL_PI_PACKAGE:-}"
+		if [[ -z "$package_path" ]] && [[ -n "${GLOBAL_NPM_ROOT:-}" ]]; then
+			package_path="$GLOBAL_NPM_ROOT/@earendil-works/pi-coding-agent"
+		fi
+		if [[ -n "$package_path" ]]; then
+			rm -rf "$package_path" || true
+			mkdir -p "$(dirname "$package_path")" || true
+			move_path "$BACKUP_DIR/cli/package" "$package_path" ||
+				echo "pi-bootstrap: could not restore the previous Pi package to $package_path" >&2
+		fi
+	fi
+	if [[ -f "$BACKUP_DIR/cli/bin.existed" ]]; then
+		local bin_path="${GLOBAL_PI_BIN:-}"
+		if [[ -z "$bin_path" && -n "${GLOBAL_NPM_PREFIX:-}" ]]; then
+			bin_path="$GLOBAL_NPM_PREFIX/bin/pi"
+		fi
+		if [[ -n "$bin_path" ]]; then
+			mkdir -p "$(dirname "$bin_path")" || true
+			if [[ -f "$BACKUP_DIR/cli/bin-file" ]]; then
+				# Remove first: the failed run may have replaced the file with a
+				# symlink, and `cp` would write through a dangling link.
+				rm -f "$bin_path" || true
+				cp -p "$BACKUP_DIR/cli/bin-file" "$bin_path" ||
+					echo "pi-bootstrap: could not restore $bin_path" >&2
+			else
+				old_target="$(cat "$BACKUP_DIR/cli/bin-target" 2>/dev/null || true)"
+				[[ -z "$old_target" ]] || ln -sfn "$old_target" "$bin_path" ||
+					echo "pi-bootstrap: could not restore the pi bin link" >&2
+			fi
+		fi
+	fi
+}
+
+discard_backup() {
+	rm -rf "$BACKUP_DIR" || true
+	rm -f "$JOURNAL" || true
+}
+
+# Rollback for the in-process failure path. Never exits, so the original status
+# is preserved. Verifies the restored environment with the real Pi loader and
+# says so explicitly when it cannot.
+recover() {
+	((MUTATION_STARTED)) || return 0
+	((RECOVERY_ACTIVE)) && return 0
+	RECOVERY_ACTIVE=1
+	MUTATION_STARTED=0
+	set +e
+	echo "pi-bootstrap: rolling back to the previous state..." >&2
+	restore_from_backup
+
+	# 0 = restored and proven to load, 3 = restored but unprovable (no real
+	# loader / stub pi), anything else = restored but verification failed.
+	if [[ -n "${GLOBAL_PI_BIN:-}" && -x "${GLOBAL_PI_BIN}" ]]; then
+		PI_BIN="$GLOBAL_PI_BIN"
+	fi
+	local verify_status=0
+	if [[ -n "$VERIFY_STACK_JS" && -f "$BACKUP_DIR/pre-state.json" ]]; then
+		verify_stack verify --expect "$BACKUP_DIR/pre-state.json" >&2 || verify_status=$?
+	else
+		verify_status=3
+	fi
+	case "$verify_status" in
+		0)
+			echo "pi-bootstrap: previous environment restored and verified: Pi and the managed extensions load, and the commands the previous installation registered are back." >&2
+			discard_backup
+			;;
+		3)
+			echo "pi-bootstrap: files restored, but this environment cannot be verified automatically (no real Pi launcher/loader was available). Backups were removed because the previous files are back in place." >&2
+			discard_backup
+			;;
+		*)
+			echo "pi-bootstrap: rollback restored the files, but the previous environment FAILED verification. Do not start Pi until this is resolved." >&2
+			echo "pi-bootstrap: backups are kept at $BACKUP_DIR; the next installer run will refuse to start until they are resolved." >&2
+			;;
+	esac
+	echo "pi-bootstrap: fix the reported problem and re-run install.sh." >&2
+	return 0
+}
+
+# Recover from a run that was killed without running any trap (SIGKILL, power
+# loss). Runs before anything in a new install touches the filesystem.
+recover_interrupted_run() {
+	local status=""
+	[[ -f "$JOURNAL" ]] || return 0
+	status="$(sed -n 's/^status=//p' "$JOURNAL" | head -n 1)"
+	# shellcheck disable=SC1090
+	. "$JOURNAL" 2>/dev/null || true
+	if [[ "$status" == "committed" ]]; then
+		echo "pi-bootstrap: cleaning up a previous run that committed but did not finish"
+		discard_backup
+		return 0
+	fi
+	echo "pi-bootstrap: a previous run was interrupted during '${phase:-unknown}' and left backups in $BACKUP_DIR" >&2
+	echo "pi-bootstrap: rolling back to the previous state before continuing..." >&2
+	restore_from_backup
+	# Verify through the npm global launcher that was just restored, not through
+	# whatever `pi` happens to be first on PATH.
+	if [[ -n "${GLOBAL_PI_BIN:-}" && -x "${GLOBAL_PI_BIN}" ]]; then
+		PI_BIN="$GLOBAL_PI_BIN"
+	fi
+	local verify_status=3
+	if [[ -n "$VERIFY_STACK_JS" && -f "$BACKUP_DIR/pre-state.json" && -n "${PI_BIN:-}" ]]; then
+		verify_stack verify --expect "$BACKUP_DIR/pre-state.json" >&2 || verify_status=$?
+	fi
+	case "$verify_status" in
+		0)
+			discard_backup
+			echo "pi-bootstrap: previous environment restored and verified" >&2
+			;;
+		3)
+			discard_backup
+			echo "pi-bootstrap: previous files restored; automatic verification was not possible here" >&2
+			;;
+		*)
+			fail "could not verify the environment restored after the interrupted run; backups are kept at $BACKUP_DIR"
+			;;
+	esac
+}
+
+commit_transaction() {
+	RUN_COMMITTED=1
+	journal_write committed complete
+	discard_backup
+	MUTATION_STARTED=0
 }
 
 install_classifier_extension() {
@@ -574,55 +1438,88 @@ install_classifier_extension() {
 	cat >"$EXTENSIONS_DIR/classifier-model.ts" <<'CLASSIFIER_MODEL_EXTENSION'
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type JsonObject = Record<string, unknown>;
 
-const CONFIG_PATH = join(homedir(), ".pi", "agent", "permission-modes.json");
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DISABLE_LABEL = "Disable classifier";
 
-function readConfig(): JsonObject {
+// Pi resolves its agent directory from PI_CODING_AGENT_DIR (see
+// getAgentDir() in @earendil-works/pi-coding-agent). The classifier selection
+// must be written to the same directory Pi and its packages use, otherwise
+// `/classifier-model` appears to work while permission-modes keeps reading a
+// different file. PI_AGENT_DIR is this repository's installer-only override
+// and is deliberately not consulted here: Pi itself ignores it, so honoring
+// it would reintroduce the mismatch. The installer translates PI_AGENT_DIR to
+// PI_CODING_AGENT_DIR for the `pi` process it drives.
+export function resolveAgentDir(): string {
+	const configured = process.env.PI_CODING_AGENT_DIR?.trim();
+	if (!configured) return join(homedir(), ".pi", "agent");
+	if (configured === "~") return homedir();
+	if (configured.startsWith("~/")) return join(homedir(), configured.slice(2));
+	return resolve(configured);
+}
+
+export function resolveConfigPath(): string {
+	return join(resolveAgentDir(), "permission-modes.json");
+}
+
+// Compatibility boundary, verified against the pinned permission-modes 2.8.0
+// source (config.ts): `_configPath = join(homedir(), ".pi", "agent",
+// "permission-modes.json")`. Upstream ignores PI_CODING_AGENT_DIR, so when Pi
+// runs with a custom agent directory the two paths differ. The selection is
+// written to Pi's directory (what the requirement and the installer use) and
+// mirrored to the path upstream actually reads, so `/classifier-model` cannot
+// appear to work while the gate keeps reading a different file. When the paths
+// are equal - the default - there is exactly one file and one write.
+export function resolveConfigPaths(): string[] {
+	const primary = resolveConfigPath();
+	const upstream = join(homedir(), ".pi", "agent", "permission-modes.json");
+	return primary === upstream ? [primary] : [primary, upstream];
+}
+
+function readConfig(configPath: string): JsonObject {
 	let text: string;
 	try {
-		text = readFileSync(CONFIG_PATH, "utf8");
+		text = readFileSync(configPath, "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-		throw new Error(`Could not read ${CONFIG_PATH}: ${String(error)}`);
+		throw new Error(`Could not read ${configPath}: ${String(error)}`);
 	}
 
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(text);
 	} catch (error) {
-		throw new Error(`Could not parse ${CONFIG_PATH}: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`Could not parse ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-		throw new Error(`Could not parse ${CONFIG_PATH}: the JSON root must be an object`);
+		throw new Error(`Could not parse ${configPath}: the JSON root must be an object`);
 	}
 	return parsed as JsonObject;
 }
 
-function writeConfig(config: JsonObject): void {
-	const directory = dirname(CONFIG_PATH);
+function writeConfig(configPath: string, config: JsonObject): void {
+	const directory = dirname(configPath);
 	mkdirSync(directory, { recursive: true });
 
 	let mode: number | undefined;
 	try {
-		mode = statSync(CONFIG_PATH).mode;
+		mode = statSync(configPath).mode;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 
-	const temporaryPath = `${CONFIG_PATH}.tmp-${process.pid}-${Date.now()}`;
+	const temporaryPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
 	try {
 		writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
 			encoding: "utf8",
 			mode: mode ?? 0o600,
 		});
-		renameSync(temporaryPath, CONFIG_PATH);
+		renameSync(temporaryPath, configPath);
 	} catch (error) {
 		try {
 			// Best effort cleanup. The original file is left untouched on failure.
@@ -630,7 +1527,17 @@ function writeConfig(config: JsonObject): void {
 		} catch {
 			// Ignore cleanup errors and report the original write failure.
 		}
-		throw new Error(`Could not write ${CONFIG_PATH}: ${String(error)}`);
+		throw new Error(`Could not write ${configPath}: ${String(error)}`);
+	}
+}
+
+// Read a config file that may be absent or unreadable without failing the
+// command: used only to seed a baseline from the compatibility mirror.
+function safeReadConfig(configPath: string): JsonObject | undefined {
+	try {
+		return readConfig(configPath);
+	} catch {
+		return undefined;
 	}
 }
 
@@ -652,9 +1559,14 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			// Resolved per invocation so a changed PI_CODING_AGENT_DIR (or a
+			// reload in a new environment) always targets Pi's current directory.
+			const configPaths = resolveConfigPaths();
+			const configPath = configPaths[0];
+
 			let config: JsonObject;
 			try {
-				config = readConfig();
+				config = readConfig(configPath);
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 				return;
@@ -678,7 +1590,21 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const current = classifierConfig(config);
+			// When Pi runs with a custom agent directory, permission-modes 2.8.0
+			// still reads $HOME/.pi/agent/permission-modes.json. On the first use
+			// that file may hold the user's only classifier block, so it seeds the
+			// baseline instead of being overwritten with defaults.
+			let baseline = config;
+			if (configPaths.length > 1) {
+				const upstream = safeReadConfig(configPaths[1]);
+				const upstreamClassifier = upstream ? classifierConfig(upstream) : {};
+				const primaryClassifier = classifierConfig(config);
+				if (Object.keys(primaryClassifier).length === 0 && Object.keys(upstreamClassifier).length > 0) {
+					baseline = { ...config, classifier: upstreamClassifier };
+				}
+			}
+
+			const current = classifierConfig(baseline);
 			const currentModel = typeof current.model === "string" ? current.model : undefined;
 			const labels = models.map((model) => {
 				const id = modelName(model);
@@ -703,10 +1629,22 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 			}
 
 			try {
-				writeConfig({ ...config, classifier: nextClassifier });
+				for (const target of configPaths) {
+					// Each copy keeps that file's own unrelated settings (permission
+					// rules, custom keys); only the classifier block is shared, so Pi's
+					// directory and the file permission-modes reads stay in agreement.
+					const base = target === configPath ? config : readConfig(target);
+					writeConfig(target, { ...base, classifier: nextClassifier });
+				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 				return;
+			}
+			if (configPaths.length > 1) {
+				ctx.ui.notify(
+					`Classifier configuration saved to ${configPath} and mirrored to ${configPaths[1]}, which permission-modes 2.8.0 reads.`,
+					"info",
+				);
 			}
 
 			try {
@@ -798,15 +1736,22 @@ configure_tmux() {
 	strategy="$(tmux_strategy_for_version "$version")"
 
 	case "$strategy" in
+		unknown)
+			warn "could not parse tmux version (${version:-unknown}); no tmux settings were changed."
+			return 0
+			;;
+	esac
+
+	# Every remaining branch may rewrite the file; remember it first so a later
+	# failure (including a failure in this function) restores the user's config.
+	track_install_target "$TMUX_CONFIG"
+
+	case "$strategy" in
 		unsupported)
 			if [[ -f "$TMUX_CONFIG" ]]; then
 				remove_bootstrap_tmux_settings "$TMUX_CONFIG"
 			fi
 			warn "Pi modified-key support requires tmux >= 3.2. Upgrade tmux or run Pi outside tmux for modified Enter shortcuts."
-			return 0
-			;;
-		unknown)
-			warn "could not parse tmux version (${version:-unknown}); no tmux settings were changed."
 			return 0
 			;;
 	esac
@@ -847,52 +1792,95 @@ configure_tmux() {
 preflight() {
 	require_command node
 	require_command npm
-	require_command curl
 	require_command git
 	require_node_version
 	[[ -n "${HOME:-}" ]] || fail "HOME is not set"
-	mkdir -p "$EXTENSIONS_DIR" || fail "could not create $EXTENSIONS_DIR"
+	mkdir -p "$AGENT_DIR" "$EXTENSIONS_DIR" "$STATE_DIR" || fail "could not create $AGENT_DIR"
+	[[ -w "$STATE_DIR" ]] || fail "$STATE_DIR is not writable"
 	check_settings plan >/dev/null
+	resolve_global_paths
 }
 
 main() {
 	# Installed here rather than at file scope so that a test which sources this
 	# file keeps its own EXIT trap, and a subshell running main() cleans up its
-	# own temporary directories.
-	trap cleanup EXIT
-	trap 'fail "unexpected failure (exit $?)"' ERR
+	# own temporary directories. One EXIT trap owns rollback: it fires for
+	# explicit failures, errexit exits from nested functions, and signals.
+	RUN_PID="$BASHPID"
+	MUTATION_STARTED=0
+	RUN_COMMITTED=0
+	RECOVERY_ACTIVE=0
+	FAIL_REPORTED=0
+
+	PI_BIN="${PI_BIN:-}"
+	trap on_exit EXIT
+	trap 'on_signal INT 2' INT
+	trap 'on_signal TERM 15' TERM
+	trap 'on_signal HUP 1' HUP
+
 	preflight
 
 	# Verify the pinned source before anything from it can execute.
 	prepare_permission_modes_snapshot
 
-	snapshot_settings
-	MUTATION_STARTED=1
+	materialize_verify_stack
+	locate_current_pi
+	if [[ -n "$PI_BIN" ]]; then
+		export PI_CODING_AGENT_DIR="$AGENT_DIR"
+	fi
 
-	echo "Installing Pi Coding Agent ${PI_VERSION}..."
-	npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" ||
-		fail "npm could not install Pi ${PI_VERSION}"
-	locate_pi_bin
+	# A previous run that was killed before any trap could fire leaves a journal
+	# and backups. Restore that environment before this run changes anything,
+	# then let the user decide whether to retry. Test-only: stop after recovery.
+	recover_interrupted_run
+	if [[ "${PI_BOOTSTRAP_RECOVER_ONLY:-0}" == 1 ]]; then
+		echo "pi-bootstrap: recovery-only run complete" >&2
+		exit 0
+	fi
+
+	begin_transaction
+
+	install_pi_cli_staged
+	export PI_CODING_AGENT_DIR="$AGENT_DIR"
 
 	migrate_managed_packages
 	install_managed_packages
+	# Exercise rollback from a failure that a non-errtrace ERR trap would miss.
+	test_hook nested
+	test_hook pipeline
+	test_hook subshell
 	check_settings verify >/dev/null
 	verify_permission_modes "$PERMISSION_MODES_DIR"
+	test_hook after-verify
 
 	install_classifier_extension
 	install_minimal_mode
+	# Exact versions only after everything is in place; a missing or unexpected
+	# version is a failed install, not a warning.
+	verify_installed_versions
+	test_hook after-extensions
 
 	echo "Merging Pi keybindings..."
+	track_install_target "$KEYBINDINGS_FILE"
 	merge_keybindings || fail "could not merge $KEYBINDINGS_FILE"
+	test_hook after-keybindings
 
 	if command -v tmux >/dev/null 2>&1; then
 		configure_tmux
 	fi
+	test_hook after-tmux
 
-	MUTATION_STARTED=0
+	# Final proof on the real loader: Pi launches, every managed package loads,
+	# and the commands the stack promises are registered.
+	verify_installed_stack
+	test_hook after-config
+
+	commit_transaction
+	test_hook after-commit
+
 	cat <<EOF
 
-Pi bootstrap installed.
+Pi bootstrap installed and verified.
 
 Pinned stack:
   Pi:                ${PI_VERSION} (npm)

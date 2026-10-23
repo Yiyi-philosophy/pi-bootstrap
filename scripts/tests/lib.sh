@@ -20,9 +20,54 @@ new_root() {
 	printf '%s\n' "$root"
 }
 
+# Refuse to run anything that writes with the developer's real HOME. This is the
+# last-resort guard against the failure mode M2 describes: a test handed the
+# user's real agent directory must stop, not "just write there".
+#
+# The rule is deliberately about identity, not location: HOME must not be the
+# account's real home (or a parent of it), and PI_CODING_AGENT_DIR must be
+# inside HOME. A scratch HOME anywhere is accepted, so CI and power users can
+# put it wherever they like.
+real_home() {
+	local entry
+	entry="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+	[[ -n "$entry" ]] || entry="${HOME_FALLBACK:-}"
+	printf '%s\n' "${entry%/}"
+}
+
+require_scratch_home() {
+	local home="${HOME:-}" real
+	[[ -n "$home" ]] || fail_test "HOME is not set"
+	case "$home" in
+		/*) ;;
+		*) fail_test "refusing to run with a relative HOME: $home" ;;
+	esac
+	home="${home%/}"
+	real="$(real_home)"
+	if [[ -n "$real" ]]; then
+		case "$real" in
+			"$home" | "$home"/*)
+				fail_test "refusing to run with HOME=$home: it is (or contains) the real home $real; this suite writes Pi configuration"
+				;;
+		esac
+	fi
+	case "$home" in
+		/ | /root) fail_test "refusing to run with HOME=$home" ;;
+	esac
+	if [[ -n "${PI_CODING_AGENT_DIR:-}" ]]; then
+		local agent="${PI_CODING_AGENT_DIR%/}"
+		case "$agent" in
+			"$home" | "$home"/*) ;;
+			*) fail_test "refusing to run: PI_CODING_AGENT_DIR=$agent is outside HOME=$home" ;;
+		esac
+	fi
+}
+
 # export_isolated_env ROOT -- point everything the installer and Pi honor at ROOT.
 export_isolated_env() {
 	local root="$1"
+	HOME="$root/home"
+	require_scratch_home
 	export HOME="$root/home"
 	export PI_CODING_AGENT_DIR="$root/home/.pi/agent"
 	unset PI_AGENT_DIR PI_BOOTSTRAP_SOURCE_DIR PI_BIN TMUX || true
@@ -109,11 +154,11 @@ install_stubs() {
 # Create a small git repository to stand in for the pinned upstream source.
 # Prints the commit, then the tree hash, and writes the manifest to $2.
 make_fixture_repo() {
-	local dir="$1" manifest_out="$2"
+	local dir="$1" manifest_out="$2" version="${3:-1.0.0}"
 	mkdir -p "$dir/sub"
 	printf 'export const index = 1;\n' >"$dir/index.ts"
 	printf 'export const helper = 2;\n' >"$dir/sub/helper.ts"
-	printf '{"name":"fixture-package","version":"1.0.0"}\n' >"$dir/package.json"
+	printf '{"name":"fixture-package","version":"%s"}\n' "$version" >"$dir/package.json"
 	git -C "$dir" init --quiet
 	git -C "$dir" -c user.email=test@example.invalid -c user.name=test add -A
 	git -C "$dir" -c user.email=test@example.invalid -c user.name=test commit --quiet -m fixture

@@ -5,6 +5,7 @@
 # unrelated/custom packages, non-managed look-alikes, ambiguous or malformed
 # settings (fail closed, no writes), and `pi remove` failure being fatal.
 set -euo pipefail
+# shellcheck source=scripts/tests/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 root="$(new_root)"

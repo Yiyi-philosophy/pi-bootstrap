@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { skipUnlessPi } from "./lib-pi.mjs";
+import { skipUnlessPi, skipUnlessPinnedPermissionModes } from "./lib-pi.mjs";
 
 const pi = skipUnlessPi("RPC smoke");
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -40,6 +40,8 @@ if (!pmSource) {
 	console.log("SKIP RPC smoke: permission-modes 2.8.0 source not found (set PI_BOOTSTRAP_PM_280)");
 	process.exit(77);
 }
+// Exact provenance (M3).
+skipUnlessPinnedPermissionModes("RPC smoke", pmSource);
 
 // Loopback provider so Pi can select a model without any network access.
 const server = http.createServer((request, response) => {

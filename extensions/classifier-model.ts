@@ -1,54 +1,87 @@
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type JsonObject = Record<string, unknown>;
 
-const CONFIG_PATH = join(homedir(), ".pi", "agent", "permission-modes.json");
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DISABLE_LABEL = "Disable classifier";
 
-function readConfig(): JsonObject {
+// Pi resolves its agent directory from PI_CODING_AGENT_DIR (see
+// getAgentDir() in @earendil-works/pi-coding-agent). The classifier selection
+// must be written to the same directory Pi and its packages use, otherwise
+// `/classifier-model` appears to work while permission-modes keeps reading a
+// different file. PI_AGENT_DIR is this repository's installer-only override
+// and is deliberately not consulted here: Pi itself ignores it, so honoring
+// it would reintroduce the mismatch. The installer translates PI_AGENT_DIR to
+// PI_CODING_AGENT_DIR for the `pi` process it drives.
+export function resolveAgentDir(): string {
+	const configured = process.env.PI_CODING_AGENT_DIR?.trim();
+	if (!configured) return join(homedir(), ".pi", "agent");
+	if (configured === "~") return homedir();
+	if (configured.startsWith("~/")) return join(homedir(), configured.slice(2));
+	return resolve(configured);
+}
+
+export function resolveConfigPath(): string {
+	return join(resolveAgentDir(), "permission-modes.json");
+}
+
+// Compatibility boundary, verified against the pinned permission-modes 2.8.0
+// source (config.ts): `_configPath = join(homedir(), ".pi", "agent",
+// "permission-modes.json")`. Upstream ignores PI_CODING_AGENT_DIR, so when Pi
+// runs with a custom agent directory the two paths differ. The selection is
+// written to Pi's directory (what the requirement and the installer use) and
+// mirrored to the path upstream actually reads, so `/classifier-model` cannot
+// appear to work while the gate keeps reading a different file. When the paths
+// are equal - the default - there is exactly one file and one write.
+export function resolveConfigPaths(): string[] {
+	const primary = resolveConfigPath();
+	const upstream = join(homedir(), ".pi", "agent", "permission-modes.json");
+	return primary === upstream ? [primary] : [primary, upstream];
+}
+
+function readConfig(configPath: string): JsonObject {
 	let text: string;
 	try {
-		text = readFileSync(CONFIG_PATH, "utf8");
+		text = readFileSync(configPath, "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-		throw new Error(`Could not read ${CONFIG_PATH}: ${String(error)}`);
+		throw new Error(`Could not read ${configPath}: ${String(error)}`);
 	}
 
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(text);
 	} catch (error) {
-		throw new Error(`Could not parse ${CONFIG_PATH}: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`Could not parse ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-		throw new Error(`Could not parse ${CONFIG_PATH}: the JSON root must be an object`);
+		throw new Error(`Could not parse ${configPath}: the JSON root must be an object`);
 	}
 	return parsed as JsonObject;
 }
 
-function writeConfig(config: JsonObject): void {
-	const directory = dirname(CONFIG_PATH);
+function writeConfig(configPath: string, config: JsonObject): void {
+	const directory = dirname(configPath);
 	mkdirSync(directory, { recursive: true });
 
 	let mode: number | undefined;
 	try {
-		mode = statSync(CONFIG_PATH).mode;
+		mode = statSync(configPath).mode;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 
-	const temporaryPath = `${CONFIG_PATH}.tmp-${process.pid}-${Date.now()}`;
+	const temporaryPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
 	try {
 		writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
 			encoding: "utf8",
 			mode: mode ?? 0o600,
 		});
-		renameSync(temporaryPath, CONFIG_PATH);
+		renameSync(temporaryPath, configPath);
 	} catch (error) {
 		try {
 			// Best effort cleanup. The original file is left untouched on failure.
@@ -56,7 +89,17 @@ function writeConfig(config: JsonObject): void {
 		} catch {
 			// Ignore cleanup errors and report the original write failure.
 		}
-		throw new Error(`Could not write ${CONFIG_PATH}: ${String(error)}`);
+		throw new Error(`Could not write ${configPath}: ${String(error)}`);
+	}
+}
+
+// Read a config file that may be absent or unreadable without failing the
+// command: used only to seed a baseline from the compatibility mirror.
+function safeReadConfig(configPath: string): JsonObject | undefined {
+	try {
+		return readConfig(configPath);
+	} catch {
+		return undefined;
 	}
 }
 
@@ -78,9 +121,14 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			// Resolved per invocation so a changed PI_CODING_AGENT_DIR (or a
+			// reload in a new environment) always targets Pi's current directory.
+			const configPaths = resolveConfigPaths();
+			const configPath = configPaths[0];
+
 			let config: JsonObject;
 			try {
-				config = readConfig();
+				config = readConfig(configPath);
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 				return;
@@ -104,7 +152,21 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const current = classifierConfig(config);
+			// When Pi runs with a custom agent directory, permission-modes 2.8.0
+			// still reads $HOME/.pi/agent/permission-modes.json. On the first use
+			// that file may hold the user's only classifier block, so it seeds the
+			// baseline instead of being overwritten with defaults.
+			let baseline = config;
+			if (configPaths.length > 1) {
+				const upstream = safeReadConfig(configPaths[1]);
+				const upstreamClassifier = upstream ? classifierConfig(upstream) : {};
+				const primaryClassifier = classifierConfig(config);
+				if (Object.keys(primaryClassifier).length === 0 && Object.keys(upstreamClassifier).length > 0) {
+					baseline = { ...config, classifier: upstreamClassifier };
+				}
+			}
+
+			const current = classifierConfig(baseline);
 			const currentModel = typeof current.model === "string" ? current.model : undefined;
 			const labels = models.map((model) => {
 				const id = modelName(model);
@@ -129,10 +191,22 @@ export default function classifierModelExtension(pi: ExtensionAPI) {
 			}
 
 			try {
-				writeConfig({ ...config, classifier: nextClassifier });
+				for (const target of configPaths) {
+					// Each copy keeps that file's own unrelated settings (permission
+					// rules, custom keys); only the classifier block is shared, so Pi's
+					// directory and the file permission-modes reads stay in agreement.
+					const base = target === configPath ? config : readConfig(target);
+					writeConfig(target, { ...base, classifier: nextClassifier });
+				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 				return;
+			}
+			if (configPaths.length > 1) {
+				ctx.ui.notify(
+					`Classifier configuration saved to ${configPath} and mirrored to ${configPaths[1]}, which permission-modes 2.8.0 reads.`,
+					"info",
+				);
 			}
 
 			try {

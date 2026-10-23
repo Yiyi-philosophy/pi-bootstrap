@@ -11,7 +11,11 @@
 //     found" result (exit 1) can still have destroyed the installation;
 //   * a settings file that cannot be parsed makes save() a silent no-op while
 //     the command still exits 0;
-//   * settings.json is rewritten as 2-space JSON with no trailing newline.
+//   * settings.json is rewritten as 2-space JSON with no trailing newline;
+//   * `npm install -g` (--fake-npm-install) builds a global package tree with a
+//     bin symlink in FAKE_NPM_STAGE_PREFIX, so the installer's staged install
+//     and activation are exercised against npm's real layout;
+//   * `--version` reports FAKE_PI_VERSION (default 1.4.0).
 //
 // Failure knobs (env):
 //   FAKE_PI_LOG                 append one line per invocation
@@ -23,9 +27,67 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(process.env.HOME || "", ".pi", "agent");
 const SETTINGS = path.join(AGENT_DIR, "settings.json");
+const PI_VERSION = process.env.FAKE_PI_VERSION || "1.4.0";
+
+// Simulate `npm install -g @earendil-works/pi-coding-agent@<version>` into the
+// stage prefix given on the command line or FAKE_NPM_STAGE_PREFIX.
+function fakeGlobalInstall(prefix) {
+	const packageDir = path.join(prefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+	fs.rmSync(packageDir, { recursive: true, force: true });
+	fs.mkdirSync(path.join(packageDir, "dist", "bundle"), { recursive: true });
+	fs.writeFileSync(
+		path.join(packageDir, "package.json"),
+		JSON.stringify(
+			{
+				name: "@earendil-works/pi-coding-agent",
+				version: PI_VERSION,
+				type: "module",
+				bin: { pi: "dist/bundle/cli.js" },
+				// Explicit marker: verify-stack.mjs reports SKIP instead of
+				// pretending this stub has Pi's real extension loader.
+				piBootstrapTestStub: true,
+			},
+			null,
+			2,
+		),
+	);
+	// The CLI is a real, executable file (npm sets the exec bit), so the
+	// installer's bin-link logic runs against the same shape npm creates. It
+	// reports the version it was built as, which makes activating the wrong
+	// staged tree observable.
+	const cliPath = path.join(packageDir, "dist", "bundle", "cli.js");
+	fs.writeFileSync(
+		cliPath,
+		[
+			"#!/usr/bin/env node",
+			`// fake Pi ${PI_VERSION} CLI`,
+			`process.env.FAKE_PI_VERSION = ${JSON.stringify(PI_VERSION)};`,
+			`await import(${JSON.stringify(pathToFileURL(fileURLToPath(import.meta.url)).href)});`,
+			"",
+		].join("\n"),
+	);
+	fs.chmodSync(cliPath, 0o755);
+	const binDir = path.join(prefix, "bin");
+	fs.mkdirSync(binDir, { recursive: true });
+	const binPath = path.join(binDir, "pi");
+	fs.rmSync(binPath, { force: true });
+	fs.symlinkSync("../lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js", binPath);
+}
+
+const [firstArg, ...rest] = process.argv.slice(2);
+if (firstArg === "--fake-npm-install") {
+	const prefix = process.env.FAKE_NPM_STAGE_PREFIX;
+	if (!prefix) {
+		console.error("fake-pi: FAKE_NPM_STAGE_PREFIX must be set");
+		process.exit(1);
+	}
+	fakeGlobalInstall(prefix);
+	process.exit(0);
+}
 
 function log(line) {
 	if (process.env.FAKE_PI_LOG) fs.appendFileSync(process.env.FAKE_PI_LOG, line + "\n");
@@ -81,7 +143,9 @@ function sourceString(entry) {
 function parse(source) {
 	if (source.startsWith("npm:")) {
 		const id = identity(source);
-		return { type: "npm", name: id.slice(4) };
+		const spec = source.slice(4).trim();
+		const version = spec.startsWith(id.slice(4) + "@") ? spec.slice(id.slice(4).length + 1) : undefined;
+		return { type: "npm", name: id.slice(4), version };
 	}
 	const url = source.startsWith("git:") ? source.slice(4).trim() : source;
 	const at = url.lastIndexOf("@");
@@ -102,7 +166,10 @@ function installNpm(source) {
 	}
 	const target = path.join(root, "node_modules", parsed.name);
 	fs.mkdirSync(target, { recursive: true });
-	fs.writeFileSync(path.join(target, "package.json"), JSON.stringify({ name: parsed.name }, null, 2));
+	fs.writeFileSync(
+		path.join(target, "package.json"),
+		JSON.stringify({ name: parsed.name, version: parsed.version ?? "0.0.0" }, null, 2),
+	);
 }
 
 function installGit(source) {
@@ -200,7 +267,7 @@ function list() {
 	for (const entry of entries) console.log(`  ${sourceString(entry)}`);
 }
 
-const [command, ...rest] = process.argv.slice(2);
+const command = firstArg;
 try {
 	switch (command) {
 		case "install":

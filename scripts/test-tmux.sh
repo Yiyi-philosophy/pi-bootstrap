@@ -5,6 +5,7 @@
 # user configuration is touched. Covers every version the docs claim:
 # 3.1, 3.2, 3.3a, 3.4, 3.5, 3.5a, 3.6 (plus an unparseable version).
 set -euo pipefail
+# shellcheck source=scripts/tests/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tests/lib.sh"
 
 root="$(new_root)"

@@ -5,6 +5,7 @@
 # pre-install source verification (wrong commit / tree / file content), tampered
 # checkout detection, and bounded rollback that leaves no partial matrix.
 set -euo pipefail
+# shellcheck source=scripts/tests/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 root="$(new_root)"
@@ -17,7 +18,12 @@ settings="$agent/settings.json"
 source_repo="$root/upstream/pi-permission-modes"
 mkdir -p "$root/upstream" "$agent/extensions"
 
-fixture_revs=($(make_fixture_repo "$source_repo" "$root/manifest.txt"))
+# Load the installer once in this shell so tests can read the pinned constants;
+# run main() in a subshell so a fatal exit() cannot end the test run. The
+# fixture repository reports the pinned permission-modes version, because the
+# installer now checks installed versions exactly.
+load_installer
+mapfile -t fixture_revs < <(make_fixture_repo "$source_repo" "$root/manifest.txt" "$PERMISSION_MODES_VERSION")
 fixture_commit="${fixture_revs[0]}"
 fixture_tree="${fixture_revs[1]}"
 fixture_manifest="$(cat "$root/manifest.txt")"
@@ -30,6 +36,7 @@ printf 'export default function minimalMode() {}\n' >"$root/minimal-mode.ts"
 minimal_sha="$(sha256sum "$root/minimal-mode.ts" | cut -d' ' -f1)"
 export FAKE_CURL_FILE="$root/minimal-mode.ts"
 
+# shellcheck disable=SC2034 # these constants are read by the sourced installer
 configure_installer() {
 	# Point the pinned constants at the local fixture repository.
 	PERMISSION_MODES_COMMIT="$fixture_commit"
@@ -44,13 +51,13 @@ configure_installer() {
 	export FAKE_PI_CLONE_DIR="$source_repo"
 }
 
-# Load the installer once in this shell so tests can read the pinned constants;
-# run main() in a subshell so a fatal exit() cannot end the test run.
-load_installer
 configure_installer
 
+# The stub `pi` has no real extension loader, so the final stack verification
+# reports SKIP. The production default fails closed in that situation (proved by
+# test-rollback.sh); these installer-behavior tests opt in explicitly.
 run_installer() {
-	( main ) >"$root/install.log" 2>&1
+	( PI_BOOTSTRAP_ALLOW_UNVERIFIED=1 main ) >"$root/install.log" 2>&1
 }
 
 # --- 1. Fresh install -------------------------------------------------------
@@ -128,6 +135,7 @@ git -C "$root/tampered" -c user.email=t@example.invalid -c user.name=t commit -q
 tampered_commit="$(git -C "$root/tampered" rev-parse HEAD)"
 rm -rf "$agent/git"
 : >"$FAKE_PI_LOG"
+# shellcheck disable=SC2034 # overrides read by main()
 if (PERMISSION_MODES_REPO="$root/tampered"; PERMISSION_MODES_COMMIT="$tampered_commit"; main) >"$root/tampered.log" 2>&1; then
 	fail_test "installer accepted a commit whose tree differs from the pin"
 fi

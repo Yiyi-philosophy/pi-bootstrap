@@ -2,9 +2,10 @@
 // classifier-model.ts configuration safety, exercised through the real
 // extension module (Node's built-in TypeScript type stripping; no build step).
 //
-// The extension resolves its config path from homedir(), so this test must run
-// with HOME pointing at a scratch directory (scripts/tests/run-all.sh does).
-// Nothing here touches a model provider: the registry and UI are stubs.
+// The extension resolves its config path from PI_CODING_AGENT_DIR (falling back
+// to $HOME/.pi/agent), so this test must run with HOME pointing at a scratch
+// directory; run-all.sh sets both. Nothing here touches a model provider: the
+// registry and UI are stubs.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,7 +19,22 @@ const extensionPath = path.join(repo, "extensions/classifier-model.ts");
 
 const home = process.env.HOME;
 assert(home && !home.startsWith("/root"), "HOME must be an isolated scratch directory");
-const agentDir = path.join(home, ".pi", "agent");
+const agentDir = path.resolve(process.env.PI_CODING_AGENT_DIR || path.join(home, ".pi", "agent"));
+// This test writes permission-modes.json. Refuse any directory that is not
+// inside this run's scratch HOME, so a wrong PI_CODING_AGENT_DIR can never
+// overwrite a real Pi configuration (M2).
+const scratchHome = path.resolve(home);
+assert(
+	agentDir === scratchHome || agentDir.startsWith(`${scratchHome}${path.sep}`),
+	`refusing to run: agent dir ${agentDir} is outside the scratch HOME ${scratchHome}`,
+);
+// A real `$HOME` is itself "inside HOME", so also require that HOME is a
+// scratch directory under TMPDIR (run-all.sh sets both to the same fresh dir).
+const scratchRoot = path.resolve(os.tmpdir());
+assert(
+	scratchHome === scratchRoot || scratchHome.startsWith(`${scratchRoot}${path.sep}`),
+	`refusing to run: HOME ${scratchHome} is not a scratch directory under ${scratchRoot}; this test writes permission-modes.json`,
+);
 const configPath = path.join(agentDir, "permission-modes.json");
 fs.mkdirSync(agentDir, { recursive: true });
 

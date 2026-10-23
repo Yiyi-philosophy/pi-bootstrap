@@ -6,6 +6,7 @@
 # the file list together, the result is accepted, and a dirty checkout is
 # refused (the pins may only describe a clean commit).
 set -euo pipefail
+# shellcheck source=scripts/tests/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 root="$(new_root)"
@@ -88,5 +89,41 @@ fi
 assert_contains "$(cat "$root/empty.log")" "no commits" "empty checkout refused"
 bash -n "$installer" || fail_test "refusal left install.sh broken"
 pass "--write: refuses to write an empty manifest"
+
+# 7. An interrupted/failing write never damages install.sh (M5). A successful
+#    result is byte-identical to what the helper produced before, temp files are
+#    cleaned up, and the file keeps its mode.
+cp "$installer" "$root/install.before"
+mode_before="$(stat -c '%a' "$installer")"
+if ! "$helper" "$source_repo" --write >"$root/write2.log" 2>&1; then
+	fail_test "second --write failed: $(cat "$root/write2.log")"
+fi
+cmp -s "$root/install.before" "$installer" || fail_test "a repeat --write was not byte-identical"
+assert_eq "$mode_before" "$(stat -c '%a' "$installer")" "install.sh keeps its mode"
+leftovers="$(find "$(dirname "$installer")" -maxdepth 1 -name '.install.sh.pin.*' | wc -l | tr -d ' ')"
+assert_eq "0" "$leftovers" "no temporary candidate files remain"
+pass "--write: repeat run is byte-identical, mode preserved, no temp files left"
+
+# 8. A writer that fails midway leaves the original untouched.
+cp "$installer" "$root/install.before"
+cat >"$root/failing-node" <<'NODE'
+#!/usr/bin/env bash
+# Copy a partial file into the candidate, then fail: exactly the "interrupted
+# write" shape the atomic rename must protect against.
+for last; do :; done
+printf 'half written\n' >"$last"
+echo "simulated interruption" >&2
+exit 1
+NODE
+chmod +x "$root/failing-node"
+if PI_BOOTSTRAP_PIN_NODE="$root/failing-node" PI_BOOTSTRAP_INSTALLER="$installer" \
+	"$helper" "$source_repo" --write >"$root/interrupted.log" 2>&1; then
+	fail_test "--write succeeded although the writer failed"
+fi
+cmp -s "$root/install.before" "$installer" || fail_test "a failed write modified install.sh"
+leftovers="$(find "$(dirname "$installer")" -maxdepth 1 -name '.install.sh.pin.*' | wc -l | tr -d ' ')"
+assert_eq "0" "$leftovers" "a failed write leaves no temporary candidate file"
+bash -n "$installer" || fail_test "install.sh is broken after a failed write"
+pass "--write: a failing writer leaves install.sh byte-identical and no temp files"
 
 echo "pin helper tests passed"

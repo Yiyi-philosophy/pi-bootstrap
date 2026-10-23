@@ -52,9 +52,24 @@ count="$(wc -l <"$manifest" | tr -d ' ')"
 }
 
 if [[ "$write" == "--write" ]]; then
-	node - "$installer" "$commit" "$tree" "$count" "$manifest" <<'NODE'
+	# M5: never write install.sh in place. The rewrite goes to a temporary file
+	# in the same directory (so the final rename is atomic on one filesystem),
+	# is validated, and only then replaces the original. A failure at any point
+	# leaves the original install.sh byte-identical.
+	installer_dir="$(cd "$(dirname "$installer")" && pwd)"
+	installer_name="$(basename "$installer")"
+	candidate="$(mktemp "$installer_dir/.${installer_name}.pin.XXXXXX")" || {
+		echo "could not create a temporary file next to $installer" >&2
+		exit 1
+	}
+	cleanup_candidate() { rm -f "$candidate"; }
+	trap 'rm -f "$manifest"; cleanup_candidate' EXIT
+
+	# Overridable so the test suite can inject a failing writer.
+	node_bin="${PI_BOOTSTRAP_PIN_NODE:-node}"
+	"$node_bin" - "$installer" "$commit" "$tree" "$count" "$manifest" "$candidate" <<'NODE'
 const fs = require("node:fs");
-const [file, commit, tree, count, manifestPath] = process.argv.slice(2);
+const [file, commit, tree, count, manifestPath, outputPath] = process.argv.slice(2);
 let text = fs.readFileSync(file, "utf8");
 const manifest = fs.readFileSync(manifestPath, "utf8").replace(/\n$/, "");
 
@@ -73,8 +88,58 @@ replaceOnce(
 	`PERMISSION_MODES_MANIFEST="$(cat <<'PM_MANIFEST'\n${manifest}\nPM_MANIFEST\n)"`,
 	"PERMISSION_MODES_MANIFEST",
 );
-fs.writeFileSync(file, text);
+fs.writeFileSync(outputPath, text);
 NODE
+
+	# Validate the candidate before it can become install.sh: it must parse, it
+	# must still contain the pinned values, and it must keep the rest of the file
+	# intact (same number of lines outside the manifest block).
+	if ! bash -n "$candidate"; then
+		echo "refusing to update $installer: the generated file does not parse" >&2
+		exit 1
+	fi
+	if ! grep -qx "PERMISSION_MODES_COMMIT=\"$commit\"" "$candidate" ||
+		! grep -qx "PERMISSION_MODES_TREE=\"$tree\"" "$candidate" ||
+		! grep -qx "PERMISSION_MODES_MANIFEST_COUNT=$count" "$candidate"; then
+		echo "refusing to update $installer: the generated file does not contain the new pins" >&2
+		exit 1
+	fi
+	# Nothing outside the pin block may change. Both files are normalised by
+	# masking the three pin lines and the manifest body, then compared.
+	normalise_pins() {
+		awk '
+			/^PERMISSION_MODES_COMMIT=/ { print "COMMIT"; next }
+			/^PERMISSION_MODES_TREE=/ { print "TREE"; next }
+			/^PERMISSION_MODES_MANIFEST_COUNT=/ { print "COUNT"; next }
+			/^PERMISSION_MODES_MANIFEST="\$\(cat <<.PM_MANIFEST.$/ { print "MANIFEST-OPEN"; inside = 1; next }
+			inside && /^PM_MANIFEST$/ { inside = 0; print "MANIFEST-CLOSE"; next }
+			inside { next }
+			{ print }
+		' "$1"
+	}
+	normalised_current="$(mktemp)"
+	normalised_candidate="$(mktemp)"
+	cleanup_normalised() { rm -f "$normalised_current" "$normalised_candidate"; }
+	trap 'rm -f "$manifest"; cleanup_candidate; cleanup_normalised' EXIT
+	normalise_pins "$installer" >"$normalised_current"
+	normalise_pins "$candidate" >"$normalised_candidate"
+	if ! cmp -s "$normalised_current" "$normalised_candidate"; then
+		echo "refusing to update $installer: the generated file differs outside the pin block" >&2
+		diff -u "$normalised_current" "$normalised_candidate" >&2 || true
+		exit 1
+	fi
+	rm -f "$normalised_current" "$normalised_candidate"
+	if ! chmod --reference="$installer" "$candidate" 2>/dev/null; then
+		chmod "$(stat -c '%a' "$installer" 2>/dev/null || echo 644)" "$candidate" || {
+			echo "could not match the permissions of $installer" >&2
+			exit 1
+		}
+	fi
+	# Atomic replacement: readers see either the old file or the new one.
+	mv -f "$candidate" "$installer" || {
+		echo "could not replace $installer" >&2
+		exit 1
+	}
 	echo "updated $installer: commit ${commit:0:12}, tree ${tree:0:12}, ${count} files"
 	exit 0
 fi
