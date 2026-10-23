@@ -1271,7 +1271,7 @@ begin_transaction() {
 # every step checks what is actually present, so it is safe after a partial
 # crash as well as after a trap.
 restore_from_backup() {
-	local manifest original stored created tree old_target
+	local original stored created old_target
 
 	# Files the run replaced, then files the run created.
 	if [[ -f "$BACKUP_DIR/files.tsv" ]]; then
@@ -1338,33 +1338,30 @@ restore_from_backup() {
 				echo "pi-bootstrap: could not restore the previous Pi package to $package_path" >&2
 		fi
 	fi
-	if [[ -f "$BACKUP_DIR/cli/bin.existed" ]] || [[ -f "$BACKUP_DIR/cli/bin.created" ]]; then
-		local bin_path="${GLOBAL_PI_BIN:-}"
-		if [[ -z "$bin_path" && -n "${GLOBAL_NPM_PREFIX:-}" ]]; then
-			bin_path="$GLOBAL_NPM_PREFIX/bin/pi"
-		fi
-		if [[ -f "$BACKUP_DIR/cli/bin.created" ]]; then
-			[[ -z "$bin_path" ]] || rm -f "$bin_path" ||
-				echo "pi-bootstrap: could not remove $bin_path; it did not exist before this run" >&2
-		fi
-	fi
-	if [[ -f "$BACKUP_DIR/cli/bin.existed" ]]; then
+	# The bin entry: remove it when the run created it, otherwise put back the
+	# exact link target or the exact plain file.
+	if [[ -f "$BACKUP_DIR/cli/bin.created" ]] || [[ -f "$BACKUP_DIR/cli/bin.existed" ]]; then
 		local bin_path="${GLOBAL_PI_BIN:-}"
 		if [[ -z "$bin_path" && -n "${GLOBAL_NPM_PREFIX:-}" ]]; then
 			bin_path="$GLOBAL_NPM_PREFIX/bin/pi"
 		fi
 		if [[ -n "$bin_path" ]]; then
-			mkdir -p "$(dirname "$bin_path")" || true
-			if [[ -f "$BACKUP_DIR/cli/bin-file" ]]; then
-				# Remove first: the failed run may have replaced the file with a
-				# symlink, and `cp` would write through a dangling link.
-				rm -f "$bin_path" || true
-				cp -p "$BACKUP_DIR/cli/bin-file" "$bin_path" ||
-					echo "pi-bootstrap: could not restore $bin_path" >&2
+			if [[ -f "$BACKUP_DIR/cli/bin.created" ]]; then
+				rm -f "$bin_path" ||
+					echo "pi-bootstrap: could not remove $bin_path; it did not exist before this run" >&2
 			else
-				old_target="$(cat "$BACKUP_DIR/cli/bin-target" 2>/dev/null || true)"
-				[[ -z "$old_target" ]] || ln -sfn "$old_target" "$bin_path" ||
-					echo "pi-bootstrap: could not restore the pi bin link" >&2
+				mkdir -p "$(dirname "$bin_path")" || true
+				if [[ -f "$BACKUP_DIR/cli/bin-file" ]]; then
+					# Remove first: the failed run may have replaced the file with
+					# a symlink, and `cp` would write through a dangling link.
+					rm -f "$bin_path" || true
+					cp -p "$BACKUP_DIR/cli/bin-file" "$bin_path" ||
+						echo "pi-bootstrap: could not restore $bin_path" >&2
+				else
+					old_target="$(cat "$BACKUP_DIR/cli/bin-target" 2>/dev/null || true)"
+					[[ -z "$old_target" ]] || ln -sfn "$old_target" "$bin_path" ||
+						echo "pi-bootstrap: could not restore the pi bin link" >&2
+				fi
 			fi
 		fi
 	fi
