@@ -284,7 +284,7 @@ This must be reported as a failure of the execution policy, not as a code issue.
 | `ff2075f` | README/TESTED_VERSIONS/risk-review/maintenance docs, GitHub Actions CI |
 | `82a2462` | fresh-machine rollback (remove a Pi the run created), writable-prefix preflight, fresh-install test |
 | `93c0fff` | simplify the bin-entry restore |
-| `f3a91e2` | this report (`docs/r3-closure-report.md`) |
+| `e130bff` | this report (`docs/r3-closure-report.md`) |
 
 Nothing was pushed, merged, tagged, or published. No pin was changed.
 
