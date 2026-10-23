@@ -318,6 +318,20 @@ guard now resolves both sides physically (same dangling/cyclic rule as
 `lib.sh`) before comparing; `test-isolation-guards.mjs` reproduces the escaping
 `HOME/.pi` symlink and asserts nothing is written outside HOME.
 
+Amendment (R3-closure, `..` after a missing segment): `physical_path()` used to
+append the nonexistent tail verbatim, so `HOME/new/../../outside` kept the
+`HOME/` prefix and passed the textual check while naming a directory outside
+HOME. The missing tail is now collapsed (`lexical_path()`) before the comparison,
+which is only correct because the resolved prefix is already physical. A `..`
+that stays inside HOME, and a simply missing agent directory (created after the
+guard runs), are still accepted; a component that is a dangling or cyclic
+symlink is still a refusal. `test-isolation-guards.mjs` asserts both directions.
+
+The guard test that uses a symlink to `<realHome>/.pi/agent` accepts either
+refusal (`is outside HOME` when the target exists, `symlink that does not
+resolve` when it does not, as on a CI runner with no `~/.pi/agent`); it still
+requires a non-zero exit and no `REACHED`, so the safety property is unchanged.
+
 No test reads, writes, or "repairs" `~/.pi/agent/permission-modes.json`. The
 real file was fingerprinted before and after this round (`size=357`,
 `sha256=ec33359e…46b11`, mtime `2026-10-23 02:36:32`, unchanged); the incident

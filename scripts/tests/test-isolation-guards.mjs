@@ -82,7 +82,15 @@ function run(command, args, env) {
 	fs.symlinkSync(path.join(realHome, ".pi/agent"), linkedAgent);
 	const escapingAgent = run("bash", [probe], { HOME: home, TMPDIR: tmpRoot, PI_CODING_AGENT_DIR: linkedAgent });
 	assert.notEqual(escapingAgent.status, 0, "an agent dir that symlinks outside HOME must be refused");
-	assert.match(escapingAgent.stderr, /is outside HOME/, `symlink refusal is explicit: ${escapingAgent.stderr}`);
+	// Two refusals are correct here: "outside HOME" when the link target exists
+	// and resolves outside the scratch tree, and "does not resolve" when it does
+	// not exist (the CI runner has no ~/.pi/agent). Either way the run stopped.
+	assert.match(
+		escapingAgent.stderr,
+		/is outside HOME|symlink that does not resolve/,
+		`symlink refusal is explicit: ${escapingAgent.stderr}`,
+	);
+	assert.doesNotMatch(escapingAgent.stdout, /REACHED/, "the run stopped at the guard");
 
 	// A symlink that does not resolve is not a missing path: it cannot be proven
 	// to stay inside the scratch tree, so the guard must fail closed instead of
@@ -115,10 +123,35 @@ function run(command, args, env) {
 	assert.match(cyclicRun.stderr, /does not resolve/, `cyclic refusal is explicit: ${cyclicRun.stderr}`);
 	assert.doesNotMatch(cyclicRun.stdout, /REACHED/, "the run stopped at the guard");
 
+	// A missing path segment used to be appended to the resolved prefix without
+	// collapsing "..", so "home/new/../../outside" kept the "home/" prefix and
+	// passed the textual check while meaning a directory outside HOME. Built as a
+	// string on purpose: path.join() would collapse the ".." and hide the bug.
+	const dotDotEscape = run("bash", [probe], {
+		HOME: home,
+		TMPDIR: tmpRoot,
+		PI_CODING_AGENT_DIR: `${home}/new/../../outside`,
+	});
+	assert.notEqual(dotDotEscape.status, 0, "a missing segment followed by .. must not escape HOME");
+	assert.match(dotDotEscape.stderr, /is outside HOME/, `dot-dot refusal is explicit: ${dotDotEscape.stderr}`);
+	assert.doesNotMatch(dotDotEscape.stdout, /REACHED/, "the run stopped at the guard");
+	assert.equal(fs.existsSync(path.join(scratch, "outside")), false, "the guard created nothing outside HOME");
+
+	// ...but ".." that stays inside HOME must still be accepted, and a missing
+	// agent directory is still created after the guard runs.
+	const dotDotInside = run("bash", [probe], {
+		HOME: home,
+		TMPDIR: tmpRoot,
+		PI_CODING_AGENT_DIR: `${home}/new/../.pi/agent`,
+	});
+	assert.equal(dotDotInside.status, 0, `a ".." that stays inside HOME is allowed: ${dotDotInside.stderr}`);
+	assert.match(dotDotInside.stdout, /REACHED/, "the run continued for an in-HOME missing path");
+
 	assert.equal(fs.existsSync(danglingOutside), false, "the guard created no link target");
 	console.log("PASS isolation: lib.sh refuses a non-scratch HOME and an agent dir outside it");
 	console.log("PASS isolation: lib.sh refuses symlink escapes for HOME and for the agent directory");
 	console.log("PASS isolation: lib.sh fails closed on dangling and cyclic symlinks");
+	console.log("PASS isolation: lib.sh resolves missing segments before comparing against HOME");
 }
 
 // --- 2. the classifier battery refuses a production agent directory --------

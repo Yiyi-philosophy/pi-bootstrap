@@ -35,16 +35,35 @@ real_home() {
 	printf '%s\n' "${entry%/}"
 }
 
+# Collapse "." and ".." in a path the way the kernel would. Valid for a path
+# whose leading part is already physical, which is how physical_path() calls it:
+# the missing tail is then resolved lexically, so `HOME/new/../../outside` ends
+# up outside HOME instead of passing the prefix check verbatim.
+lexical_path() {
+	local path="$1" out="" comp
+	local IFS=/
+	local -a parts
+	read -r -a parts <<<"$path"
+	for comp in "${parts[@]}"; do
+		case "$comp" in
+			'' | .) continue ;;
+			..) out="${out%/*}" ;;
+			*) out="$out/$comp" ;;
+		esac
+	done
+	printf '%s\n' "${out:-/}"
+}
+
 # Print the physical path of DIR: symlinks resolved for the part that exists,
-# the rest appended lexically. A symlink to the real home therefore resolves to
-# the real home and is caught by the guards below instead of passing a textual
-# "it is under TMPDIR" check.
+# the rest appended and normalized lexically. A symlink to the real home
+# therefore resolves to the real home and is caught by the guards below instead
+# of passing a textual "it is under TMPDIR" check.
 #
 # Resolution fails closed (non-zero, no output) when a component that exists is
 # a symlink that does not resolve - dangling or cyclic. Such a path cannot be
 # proven to stay inside a scratch tree, so it must not be treated as a plain
-# nonexistent path. Only a missing tail that is not a symlink is appended
-# lexically; PI_CODING_AGENT_DIR is normally created after this guard runs.
+# nonexistent path. Only a missing tail that is not a symlink is appended;
+# PI_CODING_AGENT_DIR is normally created after this guard runs.
 physical_path() {
 	local target="$1" suffix="" resolved
 	target="${target%/}"
@@ -52,7 +71,7 @@ physical_path() {
 	while :; do
 		if [[ -e "$target" ]]; then
 			resolved="$(cd -P -- "$target" 2>/dev/null && pwd -P)" || return 1
-			printf '%s%s\n' "$resolved" "$suffix"
+			lexical_path "$resolved$suffix"
 			return 0
 		elif [[ -L "$target" ]]; then
 			# The link itself exists but nothing resolves behind it: dangling or
