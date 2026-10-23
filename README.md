@@ -147,13 +147,34 @@ It writes only inside `~/.pi/agent` and the active npm global prefix:
 - `.pi-bootstrap/` (this run's journal, snapshots, moved package trees, and restored-file backups; removed when the run commits or verifies its rollback)
 - the global Pi package directory and `bin/pi` link, replaced by the staged install (the previous ones are backed up under `.pi-bootstrap/`)
 
-The local extension writes `permission-modes.json` in **Pi's** agent directory — the same directory `PI_CODING_AGENT_DIR` selects, defaulting to `~/.pi/agent`:
+**A custom agent directory is UNSUPPORTED.** Pi honours `PI_CODING_AGENT_DIR`, but
+permission-modes 2.8.0 does not: it resolves *every* user file from
+`homedir()` — `permission-modes.json` (`config.ts`), `model-profiles.json` and
+`settings.json` (`profiles.ts`), and the subagent forwarding root
+(`permission-forwarding.ts`). Its single setter, `setConfigPath()`, is not
+exported from `index.ts`, and Pi loads each extension with
+`moduleCache: false`, so another extension importing `config.ts` gets a
+*separate* module instance and cannot redirect the gate. Installing into a
+custom directory would therefore leave Pi using directory A while the
+permission gate reads directory B.
+
+The installer refuses that state before doing anything:
 
 ```text
-$PI_CODING_AGENT_DIR/permission-modes.json     # default: ~/.pi/agent/permission-modes.json
+pi-bootstrap: error: <dir> is UNSUPPORTED: Pi would run with this agent
+directory, but permission-modes 2.8.0 always reads $HOME/.pi/agent … and
+cannot be redirected. … nothing was changed.
 ```
 
-permission-modes 2.8.0 itself resolves its config from `$HOME/.pi/agent/permission-modes.json` and ignores `PI_CODING_AGENT_DIR`; the pinned source sets that path at module load and offers no supported way to redirect it. `/classifier-model` therefore writes only when Pi's directory **is** that directory. With any other `PI_CODING_AGENT_DIR` the command fails closed, explains why, and writes nothing — it never mirrors the selection into `$HOME/.pi/agent`, because that would let a test or a throwaway Pi instance overwrite the user's real configuration. In that setup, set the `classifier` block in `$HOME/.pi/agent/permission-modes.json` directly. The historical `PI_AGENT_DIR` variable is ignored here exactly as Pi ignores it (the installer accepts it for its own paths and translates it for the `pi` process it drives).
+Set `HOME` (or the npm prefix) instead of `PI_CODING_AGENT_DIR`/`PI_AGENT_DIR`
+when you need the stack somewhere else. A symlink that resolves to
+`$HOME/.pi/agent` is the same directory and is accepted.
+
+With the supported layout, `/classifier-model` writes
+`$HOME/.pi/agent/permission-modes.json` — the file the gate reads — and only
+that file. It never mirrors the selection into a directory it does not own,
+because that would let a test or a throwaway Pi instance overwrite the real
+user's configuration.
 
 A missing classifier timeout defaults to 60000 ms; an existing `timeoutMs` is retained. Successful changes invoke Pi's supported `ctx.reload()` API. If reload fails, the command saves the file and asks the user to run `/reload`.
 
@@ -178,14 +199,14 @@ scripts/tests/run-all.sh           # everything available offline
 scripts/tests/run-all.sh --fetch   # also download test fixtures
 ```
 
-Each test runs with its own scratch `HOME` and `TMPDIR`, stubbed `pi`/`npm`/`curl`/`tmux`, and loopback mock servers; none reads the real `~/.pi`, and none needs a credential. The suite refuses to run against the real home directory, drops inherited `PI_CODING_AGENT_DIR`/`PI_AGENT_DIR` and forces `HOME`, the npm prefix and cache, and the tmux config inside the isolation tree for every test, and `test-default-stack.mjs` copies any agent directory it is given before touching it.
+Each test runs with its own scratch `HOME` and `TMPDIR`, stubbed `pi`/`npm`/`curl`/`tmux`, and loopback mock servers; none reads the real `~/.pi`, and none needs a credential. The suite refuses to run against the real home directory (also when reached through a symlink), drops inherited `PI_CODING_AGENT_DIR`/`PI_AGENT_DIR` and forces `HOME`, the npm prefix and cache, and the tmux config inside the isolation tree for every test, and `test-default-stack.mjs` copies any agent directory it is given before touching it.
 
 Tests that cannot run report `SKIP`, never a false `PASS`. Real-runtime tests also SKIP when the installed component is **not exactly** the pinned version (Pi 1.4.0, permission-modes 2.8.0 at `cf77816`, pi-btw 0.62.0, advisor-flow 0.14.2); a newer version is not "good enough", because it would make a PASS mean something this repository never tested.
 
 | Suite | Covers |
 |---|---|
 | `scripts/tests/test-install-settings.sh` | stale-entry detection: string/object entries, npm→git, version bumps, unrelated packages, malformed settings, `pi remove` failure |
-| `scripts/tests/test-install-run.sh` | fresh install, repeat install, upgrade from 1.0.2, pre-install/pinned-source verification, tamper detection, rollback |
+| `scripts/tests/test-install-run.sh` | fresh install, repeat install, upgrade from 1.0.2, pre-install/pinned-source verification, tamper detection, rollback, custom agent directory refused before any mutation |
 | `scripts/tests/test-install-lifecycle.mjs` | real Pi git install with and without `npm_config_ignore_scripts` |
 | `scripts/tests/test-classifier-config.mjs` | `/classifier-model` merge, disable, timeout, invalid JSON, atomic write, reload failure |
 | `scripts/tests/test-permission-gate.mjs` | fail-closed, bounded retries, allow/deny, embedded commands, powershell, outside-cwd |
@@ -193,8 +214,9 @@ Tests that cannot run report `SKIP`, never a false `PASS`. Real-runtime tests al
 | `scripts/tests/test-rpc-smoke.mjs` | headless Pi start plus command registration and invocation |
 | `scripts/tests/test-default-stack.mjs` | all five default extensions on one real loader |
 | `scripts/tests/test-rollback.sh` | every failure shape: after backup/removal/install/verification/keybindings/tmux/last step, nested function in `$( )`, failing pipeline, failing subshell, `SIGINT`, `SIGTERM`, `SIGKILL` + recovery on the next run, `SIGKILL` at each CLI filesystem boundary, journal write/no-space/rename faults at every phase, offline recovery over damaged settings, created files removed, customised keybindings/tmux restored |
-| `scripts/tests/test-config-path.sh` | `/classifier-model` path: default HOME (also spelled with a trailing slash or relatively), `PI_AGENT_DIR` ignored, and every custom `PI_CODING_AGENT_DIR` refused with the real `$HOME` config left byte-identical; persistence across reload |
-| `scripts/tests/test-isolation-guards.mjs` | the suite refuses the real HOME and an agent dir outside it; default-stack SKIPs a mismatched stack and never writes the given directory |
+| `scripts/tests/test-config-path.sh` | `/classifier-model` path: default HOME (also spelled with a trailing slash, relatively, or through a symlink), `PI_AGENT_DIR` ignored, and every custom `PI_CODING_AGENT_DIR` refused with the real `$HOME` config left byte-identical; persistence across reload |
+| `scripts/tests/test-config-source.mjs` | **real Pi 1.4.0 loader + pinned source**: which file the permission gate actually obeys. Contradictory rules in `$HOME/.pi/agent` and `PI_CODING_AGENT_DIR`; the decision must cite the former and ignore the latter (opt-in fixtures: `PI_BOOTSTRAP_PI_PACKAGE`, `PI_BOOTSTRAP_PM_280`) |
+| `scripts/tests/test-isolation-guards.mjs` | the suite refuses the real HOME (also through a symlink) and an agent dir outside it (also through a symlink); default-stack SKIPs a mismatched stack and never writes the given directory |
 | `scripts/tests/test-version-matrix.mjs` | `install.sh` and `lib-pi.mjs` agree on every pin, and the embedded verifier matches its source |
 | `scripts/tests/test-real-upgrade.mjs` | **real CLI**: Pi 1.0.2 + 2.7.0/0.61.1/0.11.0 from npm, install.sh fails after installing 1.4.0/2.8.0, Pi 1.0.2 loads every restored package again, then a clean run verifies the pinned matrix (opt-in: `PI_BOOTSTRAP_REAL_UPGRADE=1`) |
 | `scripts/test-tmux.sh` | tmux `3.1`, `3.2`, `3.3a`, `3.4`, `3.5`, `3.5a`, `3.6`, downgrade, no-trailing-newline, reload failure |

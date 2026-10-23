@@ -79,6 +79,7 @@ What it runs (each in its own scratch `HOME`, with stubs and loopback mocks; a t
 - `scripts/tests/test-version-matrix.mjs` (installer pins and the test harness agree)
 - `scripts/tests/test-rollback.sh` — every failure shape, including `SIGKILL` recovery on the next run and removal of files a failed run created
 - `scripts/tests/test-config-path.sh` — `/classifier-model` writes only when Pi's agent directory is the one permission-modes reads, and refuses every custom `PI_CODING_AGENT_DIR` without touching the real `$HOME` config
+- `scripts/tests/test-config-source.mjs` — with the real Pi loader, the permission gate obeys `$HOME/.pi/agent` and ignores `PI_CODING_AGENT_DIR`; a custom agent directory is therefore UNSUPPORTED and the installer refuses it
 - `scripts/tests/test-isolation-guards.mjs` — the suite refuses the real HOME and never writes an agent directory it is given
 - `scripts/tests/test-install-settings.sh` — stale-entry identity matching, unrelated packages, malformed settings, `pi remove` failure
 - `scripts/tests/test-install-run.sh` — fresh, repeat, upgrade from 1.0.2, pre-install source verification, tamper detection, rollback

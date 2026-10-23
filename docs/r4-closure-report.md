@@ -13,11 +13,12 @@ the "before" column are not (they existed only to demonstrate the defect).
 
 | Finding | Status | Evidence |
 |---|---|---|
-| H1 — classifier wrote into a directory other than Pi's | **FIXED** (fail closed; no mirror) | `test-config-path.sh` before/after; `probe` H1 repro |
-| H2 — recovery ran after preflight / network work | **FIXED** | `test-rollback.sh` "offline recovery" cases; probe H2 |
-| H3 — `journal_write` ignored write/rename failure | **FIXED** | `test-rollback.sh` six journal-fault cases; probe H3 |
-| H4 — `package.existed` recorded after the move | **FIXED** | `test-rollback.sh` five SIGKILL boundary cases; probe H4 |
-| Isolation of HOME / agent dir / npm prefix / config | **DONE** | `run-all.sh` forced isolation |
+| H1 — classifier wrote into a directory other than Pi's | **FIXED** (fail closed; no mirror) | `test-config-path.sh` before/after |
+| **P0 — the gate itself read `$HOME`, not Pi's agent directory** | **NOT FIXABLE upstream; UNSUPPORTED and refused** | `test-config-source.mjs` (real loader, contradictory rules) |
+| H2 — recovery ran after preflight / network work | **FIXED** | `test-rollback.sh` "offline recovery" cases |
+| H3 — `journal_write` ignored write/rename failure | **FIXED** | `test-rollback.sh` six journal-fault cases |
+| H4 — `package.existed` recorded after the move | **FIXED** | `test-rollback.sh` five SIGKILL boundary cases |
+| Isolation of HOME / agent dir / npm prefix / config, incl. symlink escape | **DONE** | `run-all.sh` forced isolation; `lib.sh` `physical_path`; `test-isolation-guards.mjs` |
 | Complexity: duplicated state / paths / journal handling | **REDUCED** | see "Simplification" |
 
 ## H1 — no cross-directory write, ever
@@ -78,10 +79,87 @@ agent directory. That is an accepted limitation, not a silent behaviour: the
 command says so and points at the file to edit. `docs/upgrade-risk-review.md`
 and README were updated to describe this instead of the mirror.
 
-**Note on a symlinked agent directory.** The check compares `resolve()`d paths,
-not `realpath()`, so `PI_CODING_AGENT_DIR` pointing at a symlink *to*
-`$HOME/.pi/agent` is refused. That is the fail-closed direction and needs no
-special case.
+**Note on a symlinked agent directory.** Both layers compare *physical* paths
+(`physicalPath` in the extension, `same_directory` in the installer), so
+`$HOME/.pi/agent`, `$HOME/.pi/agent/`, a relative spelling and a symlink that
+resolves to the default directory are all accepted, while a symlink that
+resolves elsewhere is refused. Both directions are tested
+(`test-config-path.sh`, `test-install-run.sh`).
+
+## P0 — the permission gate reads `$HOME/.pi/agent`, not Pi's directory
+
+H1 stopped *writing* into the wrong directory. It did not answer the larger
+question the reviewer asked: **which file does the gate obey?** It obeys
+`homedir()`.
+
+### Reproduction (real Pi 1.4.0 loader, real pinned source)
+
+Two isolated directories with contradictory rules:
+
+- `$HOME/.pi/agent/permission-modes.json` → `deny: ["Bash(denytest:*)"]`
+- `PI_CODING_AGENT_DIR/permission-modes.json` → `allow: ["Bash(denytest:*)"]`
+
+```text
+PASS gate source: a deny rule in $HOME/.pi/agent decides, although PI_CODING_AGENT_DIR allows it
+PASS gate source: a deny rule in PI_CODING_AGENT_DIR is NOT read (the gate ignores it)
+PASS gate source: control - the default layout honours the rule
+```
+
+The decision is observed on the `tool_call` handler's actual verdict
+(`Denied by permission rule [global]: Bash(denytest:*)`), after
+`before_agent_start` refreshes the merged rules — not by comparing paths.
+Committed as `scripts/tests/test-config-source.mjs`.
+
+Source, at the pinned commit: `config.ts:47`
+`let _configPath = join(homedir(), ".pi", "agent", "permission-modes.json")`.
+`profiles.ts` (model-profiles, settings) and `permission-forwarding.ts`
+(subagent root) resolve from `homedir()` too.
+
+### Can the pinned upstream be redirected without patching it? No.
+
+- `config.ts` exports `setConfigPath()`, but `index.ts` does not re-export it;
+  the only path out is `permissions-loader.ts`'s
+  `setGlobalConfigPathForTests()`, which `index.ts` does not re-export either.
+- Even reaching it would not help: Pi 1.4.0 creates a **new jiti instance per
+  extension with `moduleCache: false`** (`dist/core/extensions/loader.js`), so
+  two extensions importing the same `config.ts` get separate module instances.
+  Verified with two probe extensions: A's `setConfigPath()` changed A's path and
+  left B's at `$HOME/.pi/agent`.
+- Patching the checkout would change the audited bytes, the 69-file SHA256
+  manifest, the tree pin and the maintenance procedure. Rejected: it is not a
+  minimal fix, and it would make the verified source "the audited source plus a
+  local patch".
+
+So the honest options were "silently run with the gate reading a different
+configuration" or "refuse". The installer refuses.
+
+### The refusal
+
+`require_supported_agent_dir` (called first in `preflight`, before any
+directory is created, before the Git fetch, before the transaction):
+
+```text
+pi-bootstrap: error: <dir> is UNSUPPORTED: Pi would run with this agent
+directory, but permission-modes 2.8.0 always reads $HOME/.pi/agent
+(permission-modes.json, model-profiles.json, settings.json) and cannot be
+redirected. … nothing was changed. Run the installer with the default agent
+directory (unset PI_AGENT_DIR and PI_CODING_AGENT_DIR).
+```
+
+The comparison resolves symlinks on both sides (`same_directory`), so
+`$HOME/.pi/agent`, `$HOME/.pi/agent/`, a relative spelling and a symlink to it
+are all accepted, while a symlink pointing elsewhere is not.
+
+`/classifier-model` refuses the same layout in-session (H1), so the two layers
+agree.
+
+### Evidence
+
+| Test | Baseline | This branch |
+|---|---|---|
+| `test-config-source.mjs` | n/a (new) | PASS, 3 cases |
+| `test-install-run.sh` case 11 (custom dir) | FAIL — "Fetching permission-modes source…" (it installed) | PASS — refused before any mutation |
+| `test-install-run.sh` case 11b (symlink to default) | n/a | PASS — accepted, run proceeds past preflight |
 
 ## H2 — recovery is local-first
 
@@ -217,10 +295,19 @@ it now **forces** `HOME`, `TMPDIR`, `npm_config_prefix`, `npm_config_cache` and
 `NPM_CONFIG_PREFIX`, `NPM_CONFIG_CACHE`, `TMUX`. `PI_BOOTSTRAP_*` fixtures stay
 inherited: they are read-only inputs for the real-runtime tests.
 
+Isolation is checked physically, not textually: `lib.sh` gained
+`physical_path()`, and `require_scratch_home` now rejects a `HOME` or a
+`PI_CODING_AGENT_DIR` that *resolves* into the real home even when the path as
+written looks like a scratch directory (a symlink to `/home/<user>`, a symlink
+to its parent, or an agent-directory symlink pointing at `~/.pi/agent`).
+`test-isolation-guards.mjs` covers all three, and all three are refused.
+
 No test reads, writes, or "repairs" `~/.pi/agent/permission-modes.json`. The
 real file was fingerprinted before and after this round (`size=357`,
-`sha256=ec33359e…46b11`, mtime `2026-10-23 02:36:32`) and is unchanged; the
-incident from R3 is still the user's to resolve.
+`sha256=ec33359e…46b11`, mtime `2026-10-23 02:36:32`, unchanged); the incident
+from R3 is still the user's to resolve. Credentials were never opened:
+`auth.json`/`models.json` are only ever created empty inside a scratch agent
+directory by the RPC test.
 
 ## Simplification
 
@@ -246,22 +333,36 @@ tree (`git archive ae0421f`, plus the new test files) and against this branch:
 
 | Test | Baseline | This branch |
 |---|---|---|
-| `test-config-path.sh` | FAIL — "selection … mirrored to …$HOME…" | PASS (9 cases) |
+| `test-config-path.sh` | FAIL — "selection … mirrored to …$HOME…" | PASS (11 cases) |
 | `test-rollback.sh` H4 boundary cases | FAIL — "never reached the boundary" | PASS (5) |
 | `test-rollback.sh` H3 journal cases | FAIL — "Fetching permission-modes source…" | PASS (6) |
 | `test-rollback.sh` H2 recover-only | FAIL — "could not determine the npm global root" | PASS |
 | `test-rollback.sh` H2 damaged settings | FAIL — "settings.json is not valid JSON" | PASS |
 | `test-rollback.sh` full file | FAIL | PASS (36 cases) |
+| `test-install-run.sh` case 11 (custom agent dir) | FAIL — it installed | PASS — refused before any mutation |
+| `test-install-run.sh` case 11b (symlink to default) | n/a | PASS — accepted |
+| `test-isolation-guards.mjs` symlink escapes | FAIL (not covered) | PASS — three escapes refused |
+| `test-config-source.mjs` (P0) | n/a | PASS — 3 cases on the real loader |
 
-**Offline suite** (no network, no Pi): `22 passed, 7 skipped, 0 failed` — the
-skips are the real-runtime/real-upgrade tests whose pinned fixtures are absent
+**Offline suite** (no network, no Pi): `22 passed, 8 skipped, 0 failed` — the
+skips are the real-runtime tests (including the new P0 test), the real upgrade,
 and ShellCheck when it is not on `PATH`.
 
-**Full run** in a scratch environment: Pi 1.4.0 installed into its own prefix,
-the pinned commit fetched, ShellCheck 0.10.0 on `PATH`, network allowed:
+**Offline suite with the pinned fixtures on `PATH`** (Pi 1.4.0 + the commit +
+ShellCheck 0.10.0, network not needed for these tests):
 
 ```text
-summary: 29 passed, 0 skipped, 0 failed
+summary: 29 passed, 1 skipped, 0 failed      # the skip is the opt-in real upgrade
+```
+
+(The count moved to 30 with the P0 test; the final numbers are below.)
+
+**Full run** in a scratch environment: Pi 1.4.0 installed into its own prefix,
+the pinned commit fetched, ShellCheck 0.10.0 on `PATH`, network allowed, the
+real-upgrade acceptance enabled:
+
+```text
+summary: 30 passed, 0 skipped, 0 failed
 ```
 
 including the real acceptance test:
@@ -278,11 +379,16 @@ PASS rerun after upgrade: failure rolled back to the working 1.4.0 stack
 `scripts/tests/*.sh` and `scripts/tests/fixtures/*.sh`: clean (one SC2034 found
 and fixed in the rewritten config-path test).
 
+**`git diff --check`**: clean (no whitespace errors).
+
 **CI.** `.github/workflows/ci.yml` is unchanged and already runs the offline
 gate (syntax, ShellCheck, embedded sources, pin matrix, the whole stubbed
 suite) and the real-matrix job. The new cases run inside
-`scripts/tests/test-rollback.sh` and `test-config-path.sh`, which both jobs
-execute. **The workflow itself was not exercised by GitHub Actions here**: this
+`scripts/tests/test-rollback.sh`, `test-install-run.sh`,
+`test-config-path.sh`, `test-isolation-guards.mjs`, and the new
+`test-config-source.mjs` is registered in `run-all.sh` (SKIP without the pinned
+fixtures, PASS in the real-matrix job, which is the environment where a
+`moduleCache` or loader change would show up). **The workflow itself was not exercised by GitHub Actions here**: this
 environment has no runner, so the CI claim is "the same commands pass locally",
 not "the workflow ran".
 
@@ -313,9 +419,15 @@ destroys the live package.
 
 ## Residual risks
 
-- **`/classifier-model` is unavailable under a custom agent directory** (H1).
-  Deliberate; the command explains it. Hand-edit
-  `$HOME/.pi/agent/permission-modes.json` instead.
+- **A custom agent directory is UNSUPPORTED** (P0). The installer refuses it and
+  `/classifier-model` refuses it; both explain why. Users who need the stack
+  elsewhere must change `HOME` or the npm prefix. Making `PI_CODING_AGENT_DIR`
+  work needs an upstream change to permission-modes (read the variable, or
+  export `setConfigPath`), which would change the pin, the tree, the manifest
+  and the audit — out of scope for this round and not to be done silently.
+- **`permission-modes` upstream was not modified.** The 69-file SHA256
+  manifest, the commit pin and the tree pin are untouched, so every existing
+  verification still proves the same bytes.
 - **A SIGKILL during the restore itself** can still leave a partially restored
   tree. The journal and backups survive and the next run retries; this round
   does not make the restore atomic.
@@ -338,13 +450,22 @@ Only local commits were made: no push, merge, tag, or production change.
 | Commit | Contents |
 |---|---|
 | `8f58d91` | H1 fail-closed classifier path, H2 local-first recovery, H3 journal fail-closed, H4 marker ordering; new and rewritten tests; forced test isolation |
-| this commit | README / TESTED_VERSIONS / risk review / maintenance prompt updated; this report |
+| `c047581` | README / TESTED_VERSIONS / risk review / maintenance prompt for H1–H4; first version of this report |
+| `5ed2dc3` | P0: `require_supported_agent_dir` (installer + extension), physical-path isolation guards, `test-config-source.mjs`, refusal/symlink cases |
+| this commit | README / TESTED_VERSIONS / risk review / maintenance prompt for P0; this report's P0 section and final numbers |
 
 ## Verdict
 
-**READY_TO_MERGE for the code.** H1–H4 are each closed by a fix and by a
+**READY_FOR_INDEPENDENT_REVIEW.** H1–H4 are each closed by a fix and by a
 committed test that fails on the baseline and passes here, including an offline
 recovery over damaged settings and a SIGKILL matrix that no longer loses the
-global Pi. The accepted cost of H1 is that `/classifier-model` refuses a custom
-agent directory instead of writing two files, and the one thing this branch
-still cannot fix is the workstation file an earlier round's test overwrote.
+global Pi. P0 is closed by *proving* the gate's configuration source on the real
+loader and refusing the unsupported layout, rather than by a mirror or an
+upstream patch.
+
+Two things this branch cannot fix and does not hide:
+
+1. `/classifier-model` and the installer are unavailable under a custom agent
+   directory (an upstream limitation, documented as UNSUPPORTED).
+2. The workstation file an earlier round's test overwrote is still the user's to
+   restore; this round only guarantees it cannot happen again from the suite.
