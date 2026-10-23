@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type JsonObject = Record<string, unknown>;
@@ -41,8 +41,8 @@ export function resolveConfigPath(): string {
 // fails closed and says why, so nobody believes a selection was saved while
 // the gate keeps reading another file.
 function requireSupportedAgentDir(): string {
-	const agentDir = resolve(resolveAgentDir());
-	const upstreamDir = resolve(join(homedir(), ".pi", "agent"));
+	const agentDir = physicalPath(resolve(resolveAgentDir()));
+	const upstreamDir = physicalPath(resolve(join(homedir(), ".pi", "agent")));
 	if (agentDir === upstreamDir) return agentDir;
 	const upstreamConfig = join(upstreamDir, "permission-modes.json");
 	throw new Error(
@@ -50,6 +50,26 @@ function requireSupportedAgentDir(): string {
 			`Writing that file anyway would change a directory this Pi does not own, so nothing was written. ` +
 			`Run Pi with the default agent directory (unset PI_CODING_AGENT_DIR), or set the classifier block in ${upstreamConfig} yourself.`,
 	);
+}
+
+// Resolve symlinks for the part of the path that exists and keep the rest
+// lexical, so `~/x`, `x/`, a relative spelling and a symlink to the default
+// directory all compare equal - the same rule install.sh applies, so the
+// installer and this command never disagree about which directories are
+// supported.
+function physicalPath(target: string): string {
+	let base = target;
+	const rest: string[] = [];
+	for (;;) {
+		try {
+			return join(realpathSync(base), ...rest);
+		} catch {
+			const parent = dirname(base);
+			if (parent === base) return target;
+			rest.unshift(basename(base));
+			base = parent;
+		}
+	}
 }
 
 function readConfig(configPath: string): JsonObject {

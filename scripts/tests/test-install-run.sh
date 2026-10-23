@@ -200,4 +200,76 @@ assert_contains "$(cat "$root/install.log")" "is not valid JSON" "malformed sett
 cmp -s "$root/broken.json" "$settings" || fail_test "malformed settings were rewritten"
 pass "malformed settings: preflight refuses before any package change"
 
+# --- 11. A custom agent directory is UNSUPPORTED and refused up front -----
+# permission-modes 2.8.0 reads every user file from $HOME/.pi/agent and cannot
+# be redirected (see install.sh require_supported_agent_dir), so installing
+# into any other directory would leave the gate reading a different
+# configuration than Pi. The installer must refuse before touching anything.
+#
+# AGENT_DIR is resolved when install.sh is sourced, so each case sources the
+# installer fresh inside its own subshell with the environment it tests. The
+# fixture pins are re-applied after sourcing for the same reason.
+run_installer_with_agent() {
+	local agent_dir="$1" log="$2"
+	(
+		export PI_CODING_AGENT_DIR="$agent_dir"
+		unset PI_AGENT_DIR
+		PI_BOOTSTRAP_TEST_ONLY=1 PI_BOOTSTRAP_ALLOW_UNVERIFIED=1 source "$repo_dir/install.sh"
+		configure_installer
+		use_agent_dir_paths
+		main
+	) >"$log" 2>&1
+}
+
+# The installer resolves its own paths when sourced; the fixture constants and
+# the directories it validates must be re-pointed at the environment under test
+# before main() runs. Kept as a separate step so the refusal happens for the
+# real reason (a custom agent directory), not because a fixture path was stale.
+use_agent_dir_paths() {
+	AGENT_DIR="$PI_CODING_AGENT_DIR"
+	EXTENSIONS_DIR="$AGENT_DIR/extensions"
+	KEYBINDINGS_FILE="$AGENT_DIR/keybindings.json"
+	SETTINGS_FILE="$AGENT_DIR/settings.json"
+	STATE_DIR="$AGENT_DIR/.pi-bootstrap"
+	BACKUP_DIR="$STATE_DIR/backup"
+	JOURNAL="$STATE_DIR/transaction.env"
+	return 0
+}
+
+custom_agent="$root/custom-agent"
+mkdir -p "$custom_agent"
+printf '{"packages":[]}\n' >"$custom_agent/settings.json"
+cp "$custom_agent/settings.json" "$root/custom-before.json"
+before_prefix="$(find "$root/npm-prefix" -mindepth 1 | LC_ALL=C sort)"
+: >"$FAKE_PI_LOG"
+if run_installer_with_agent "$custom_agent" "$root/custom-dir.log"; then
+	fail_test "the installer accepted a custom PI_CODING_AGENT_DIR"
+fi
+custom_log="$(cat "$root/custom-dir.log")"
+assert_contains "$custom_log" "UNSUPPORTED" "the refusal names the limitation"
+assert_contains "$custom_log" "always reads" "the refusal names the file permission-modes reads"
+assert_contains "$custom_log" "nothing was changed" "the refusal states that nothing was changed"
+assert_not_contains "$custom_log" "Fetching permission-modes source" "no network work happened first"
+assert_not_contains "$custom_log" "rolling back" "nothing was mutated, so nothing was rolled back"
+cmp -s "$root/custom-before.json" "$custom_agent/settings.json" ||
+	fail_test "the custom agent directory's settings.json was modified"
+[[ ! -e "$custom_agent/.pi-bootstrap" ]] || fail_test "a state directory was created in the refused agent dir"
+[[ ! -e "$custom_agent/npm" && ! -e "$custom_agent/git" ]] || fail_test "package trees were created in the refused agent dir"
+[[ "$(find "$root/npm-prefix" -mindepth 1 | LC_ALL=C sort)" == "$before_prefix" ]] ||
+	fail_test "the global npm prefix changed although the run was refused"
+assert_eq "0" "$(grep -c '^install ' "$FAKE_PI_LOG" || true)" "no package was installed"
+pass "custom agent directory: refused before any mutation, with the reason and the unsupported status"
+
+# A symlink to the default directory is the same directory, not a custom one.
+printf '{"packages":[]}\n' >"$settings"
+ln -sfn "$agent" "$root/default-link"
+# Whether that run then succeeds is covered by the cases above; what matters
+# here is that the agent-directory gate did not reject it.
+run_installer_with_agent "$root/default-link" "$root/link-dir.log" || true
+assert_not_contains "$(cat "$root/link-dir.log")" "UNSUPPORTED" \
+	"a symlink to the default directory is not treated as a custom directory"
+assert_contains "$(cat "$root/link-dir.log")" "Installing Pi Coding Agent" \
+	"the run proceeded past preflight with the symlinked default directory"
+pass "custom agent directory: a symlink to \$HOME/.pi/agent is accepted as the default directory"
+
 echo "install-run tests passed"

@@ -1589,9 +1589,9 @@ install_classifier_extension() {
 
 	# Keep curl | bash self-contained. Local checkouts use the repository source file.
 	cat >"$EXTENSIONS_DIR/classifier-model.ts" <<'CLASSIFIER_MODEL_EXTENSION'
-import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type JsonObject = Record<string, unknown>;
@@ -1632,8 +1632,8 @@ export function resolveConfigPath(): string {
 // fails closed and says why, so nobody believes a selection was saved while
 // the gate keeps reading another file.
 function requireSupportedAgentDir(): string {
-	const agentDir = resolve(resolveAgentDir());
-	const upstreamDir = resolve(join(homedir(), ".pi", "agent"));
+	const agentDir = physicalPath(resolve(resolveAgentDir()));
+	const upstreamDir = physicalPath(resolve(join(homedir(), ".pi", "agent")));
 	if (agentDir === upstreamDir) return agentDir;
 	const upstreamConfig = join(upstreamDir, "permission-modes.json");
 	throw new Error(
@@ -1641,6 +1641,26 @@ function requireSupportedAgentDir(): string {
 			`Writing that file anyway would change a directory this Pi does not own, so nothing was written. ` +
 			`Run Pi with the default agent directory (unset PI_CODING_AGENT_DIR), or set the classifier block in ${upstreamConfig} yourself.`,
 	);
+}
+
+// Resolve symlinks for the part of the path that exists and keep the rest
+// lexical, so `~/x`, `x/`, a relative spelling and a symlink to the default
+// directory all compare equal - the same rule install.sh applies, so the
+// installer and this command never disagree about which directories are
+// supported.
+function physicalPath(target: string): string {
+	let base = target;
+	const rest: string[] = [];
+	for (;;) {
+		try {
+			return join(realpathSync(base), ...rest);
+		} catch {
+			const parent = dirname(base);
+			if (parent === base) return target;
+			rest.unshift(basename(base));
+			base = parent;
+		}
+	}
 }
 
 function readConfig(configPath: string): JsonObject {
@@ -1924,12 +1944,55 @@ configure_tmux() {
 	echo "For modified-key changes to be guaranteed active, restart the tmux server after saving your sessions."
 }
 
+# Compare two paths the way the kernel would, resolving symlinks in the part
+# that exists and keeping the rest lexical, so `~/x`, `x/`, a relative path and
+# a symlink to the same directory all compare equal (and a symlink pointing
+# somewhere else does not).
+same_directory() {
+	node -e '
+		const path = require("node:path");
+		const fs = require("node:fs");
+		const real = (p) => {
+			let base = path.resolve(p);
+			const rest = [];
+			while (!fs.existsSync(base)) {
+				const parent = path.dirname(base);
+				if (parent === base) break;
+				rest.unshift(path.basename(base));
+				base = parent;
+			}
+			try { base = fs.realpathSync(base); } catch {}
+			return path.join(base, ...rest);
+		};
+		process.exit(real(process.argv[1]) === real(process.argv[2]) ? 0 : 1);
+	' "$1" "$2"
+}
+
+# permission-modes 2.8.0 resolves *every* user file from homedir() -
+# permission-modes.json (config.ts), model-profiles.json and settings.json
+# (profiles.ts), the subagent forwarding root (permission-forwarding.ts) - and
+# never reads PI_CODING_AGENT_DIR. Its only setter, setConfigPath(), is not
+# exported from index.ts, and Pi loads each extension with `moduleCache: false`
+# (loader.js), so another extension's import of config.ts is a *separate*
+# module instance: setting the path there does not change what the gate reads.
+# There is therefore no way to make the gate follow Pi's agent directory
+# without patching the pinned upstream source.
+#
+# The installer refuses to build a configuration where Pi uses directory A while
+# the gate reads directory B. Failing closed before any mutation is the only
+# honest option: the alternative is an install that looks protected and is not.
+require_supported_agent_dir() {
+	same_directory "$AGENT_DIR" "$HOME/.pi/agent" && return 0
+	fail "$AGENT_DIR is UNSUPPORTED: Pi would run with this agent directory, but permission-modes ${PERMISSION_MODES_VERSION} always reads $HOME/.pi/agent (permission-modes.json, model-profiles.json, settings.json) and cannot be redirected. Installing here would leave the permission gate reading a different configuration than Pi, so nothing was changed. Run the installer with the default agent directory (unset PI_AGENT_DIR and PI_CODING_AGENT_DIR)."
+}
+
 preflight() {
 	require_command node
 	require_command npm
 	require_command git
 	require_node_version
 	[[ -n "${HOME:-}" ]] || fail "HOME is not set"
+	require_supported_agent_dir
 	mkdir -p "$AGENT_DIR" "$EXTENSIONS_DIR" "$STATE_DIR" || fail "could not create $AGENT_DIR"
 	[[ -w "$STATE_DIR" ]] || fail "$STATE_DIR is not writable"
 	check_settings plan >/dev/null

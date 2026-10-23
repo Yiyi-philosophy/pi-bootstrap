@@ -5,12 +5,14 @@
 # cannot be redirected (config.ts in the pinned source sets the path at module
 # load; the only setter is a test helper). The command therefore:
 #
-#   * writes Pi's own config when Pi's agent directory IS that directory
-#     (default HOME, a trailing slash, a relative path that resolves there);
-#   * fails closed - writing nothing anywhere - when Pi's directory is anything
-#     else, instead of mirroring the selection into the real HOME.
+#   * writes $HOME/.pi/agent/permission-modes.json when Pi's agent directory IS
+#     that directory (default HOME, a trailing slash, a relative path, or a
+#     symlink that resolves there - the same rule the installer applies);
+#   * fails closed - writing nothing anywhere, without even showing the picker -
+#     when Pi's directory is anything else, instead of mirroring the selection
+#     into the real HOME.
 #
-# The last case is the H1 finding: a test or throwaway Pi instance with
+# The refusal cases are the H1 finding: a test or throwaway Pi instance with
 # PI_CODING_AGENT_DIR set must never rewrite the user's real config.
 #
 # Runs in an isolated HOME with no Pi and no network: the extension is loaded
@@ -124,8 +126,11 @@ pass "PI_AGENT_DIR: ignored (Pi ignores it too); the default Pi directory is use
 printf '{"classifier":{"model":"user/real-model","timeoutMs":15000},"permissions":{"deny":["Bash(rm *)"]}}\n' \
 	>"$home/.pi/agent/permission-modes.json"
 cp "$home/.pi/agent/permission-modes.json" "$root/upstream-before.json"
-for custom in "$root/custom-agent" "$root/trailing-agent/" "~" "relative-agent"; do
+for custom in "$root/custom-agent" "$root/trailing-agent/" "~" "relative-agent" "__symlink_to_default__"; do
 	label="custom PI_CODING_AGENT_DIR [$custom]"
+	if [[ "$custom" == "__symlink_to_default__" ]]; then
+		label="symlink to the default agent directory"
+	fi
 	if [[ "$custom" == "relative-agent" ]]; then
 		mkdir -p "$root/relative-agent"
 		PICKER_CWD="$root" run_picker HOME="$home" PI_CODING_AGENT_DIR="$custom" >"$root/custom.log" 2>&1 ||
@@ -142,6 +147,17 @@ for custom in "$root/custom-agent" "$root/trailing-agent/" "~" "relative-agent";
 			fail_test "$label: the picker was shown for a directory that cannot be written"
 		[[ ! -e "$home/permission-modes.json" ]] || fail_test "$label: HOME itself was written"
 		pass "$label: refused, no picker, HOME itself was not written"
+	elif [[ "$custom" == "__symlink_to_default__" ]]; then
+		# The same directory reached through a symlink is supported, exactly as
+		# the installer treats it: fail closed only for a *different* directory.
+		mkdir -p "$root/symlink-home/.pi/agent"
+		ln -sfn "$root/symlink-home/.pi/agent" "$root/symlink-agent"
+		printf '{"classifier":{"model":"audit/model"}}\n' >"$root/symlink-home/.pi/agent/permission-modes.json"
+		run_picker HOME="$root/symlink-home" PI_CODING_AGENT_DIR="$root/symlink-agent" >"$root/custom.log" 2>&1 ||
+			fail_test "$label: the run crashed: $(cat "$root/custom.log")"
+		assert_eq "audit/model" "$(config_of "$root/symlink-home/.pi/agent/permission-modes.json")" \
+			"$label: the symlinked default directory receives the selection"
+		pass "$label: accepted - a symlink to \$HOME/.pi/agent is the same directory"
 	else
 		mkdir -p "$root/trailing-agent" "$root/custom-agent"
 		run_picker HOME="$home" PI_CODING_AGENT_DIR="$custom" >"$root/custom.log" 2>&1 ||

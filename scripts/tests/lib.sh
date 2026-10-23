@@ -35,8 +35,23 @@ real_home() {
 	printf '%s\n' "${entry%/}"
 }
 
+# Print the physical path of DIR: symlinks resolved for the part that exists,
+# the rest appended lexically. A symlink to the real home therefore resolves to
+# the real home and is caught by the guards below instead of passing a textual
+# "it is under TMPDIR" check.
+physical_path() {
+	local target="$1" suffix=""
+	target="${target%/}"
+	[[ -n "$target" ]] || target="/"
+	while [[ ! -e "$target" && "$target" != "/" ]]; do
+		suffix="/$(basename "$target")$suffix"
+		target="$(dirname "$target")"
+	done
+	printf '%s%s\n' "$(cd -P "$target" 2>/dev/null && pwd)" "$suffix"
+}
+
 require_scratch_home() {
-	local home="${HOME:-}" real
+	local home="${HOME:-}" real home_physical
 	[[ -n "$home" ]] || fail_test "HOME is not set"
 	case "$home" in
 		/*) ;;
@@ -44,22 +59,37 @@ require_scratch_home() {
 	esac
 	home="${home%/}"
 	real="$(real_home)"
+	real="$(physical_path "$real")"
+	home_physical="$(physical_path "$home")"
 	if [[ -n "$real" ]]; then
-		case "$real" in
-			"$home" | "$home"/*)
-				fail_test "refusing to run with HOME=$home: it is (or contains) the real home $real; this suite writes Pi configuration"
-				;;
-		esac
+		# Both spellings are checked: a lexical match catches a plain path, and
+		# the physical one catches `HOME=/tmp/x` where /tmp/x is a symlink to the
+		# real home (or to a directory containing it).
+		for candidate in "$home" "$home_physical"; do
+			case "$real" in
+				"$candidate" | "$candidate"/*)
+					fail_test "refusing to run with HOME=$home (resolves to $home_physical): it is (or contains) the real home $real; this suite writes Pi configuration"
+					;;
+			esac
+		done
 	fi
 	case "$home" in
 		/ | /root) fail_test "refusing to run with HOME=$home" ;;
 	esac
 	if [[ -n "${PI_CODING_AGENT_DIR:-}" ]]; then
-		local agent="${PI_CODING_AGENT_DIR%/}"
+		local agent agent_physical
+		agent="${PI_CODING_AGENT_DIR%/}"
 		case "$agent" in
-			"$home" | "$home"/*) ;;
-			*) fail_test "refusing to run: PI_CODING_AGENT_DIR=$agent is outside HOME=$home" ;;
+			/*) ;;
+			*) agent="$PWD/$agent" ;;
 		esac
+		agent_physical="$(physical_path "$agent")"
+		for candidate in "$agent" "$agent_physical"; do
+			case "$candidate" in
+				"$home" | "$home"/* | "$home_physical" | "$home_physical"/*) ;;
+				*) fail_test "refusing to run: PI_CODING_AGENT_DIR=$agent (resolves to $agent_physical) is outside HOME=$home (resolves to $home_physical)" ;;
+			esac
+		done
 	fi
 }
 

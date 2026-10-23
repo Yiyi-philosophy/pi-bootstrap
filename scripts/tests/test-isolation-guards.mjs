@@ -68,7 +68,23 @@ function run(command, args, env) {
 	});
 	assert.notEqual(outside.status, 0, "an agent dir outside HOME must be refused");
 	assert.match(outside.stderr, /is outside HOME/, `refusal is explicit: ${outside.stderr}`);
+
+	// A symlink escape is refused as well: HOME or the agent directory can look
+	// like a scratch path textually while resolving to the real home. Both
+	// cases below would pass a plain string-prefix check.
+	const linkedHome = path.join(scratch, "linked-home");
+	fs.symlinkSync(realHome, linkedHome);
+	const symlinkedHome = run("bash", [probe], { HOME: linkedHome, TMPDIR: tmpRoot });
+	assert.notEqual(symlinkedHome.status, 0, "a HOME that is a symlink to the real home must be refused");
+	assert.match(symlinkedHome.stderr, /resolves to/, `symlink refusal is explicit: ${symlinkedHome.stderr}`);
+
+	const linkedAgent = path.join(home, "agent-link");
+	fs.symlinkSync(path.join(realHome, ".pi/agent"), linkedAgent);
+	const escapingAgent = run("bash", [probe], { HOME: home, TMPDIR: tmpRoot, PI_CODING_AGENT_DIR: linkedAgent });
+	assert.notEqual(escapingAgent.status, 0, "an agent dir that symlinks outside HOME must be refused");
+	assert.match(escapingAgent.stderr, /is outside HOME/, `symlink refusal is explicit: ${escapingAgent.stderr}`);
 	console.log("PASS isolation: lib.sh refuses a non-scratch HOME and an agent dir outside it");
+	console.log("PASS isolation: lib.sh refuses symlink escapes for HOME and for the agent directory");
 }
 
 // --- 2. the classifier battery refuses a production agent directory --------
