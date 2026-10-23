@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Run the whole pi-bootstrap test suite.
 #
+# The suite never writes outside its own scratch trees. Before anything runs it
+# asserts that the real HOME is not in use and that PI_CODING_AGENT_DIR (if set)
+# is a scratch path, because several tests write Pi configuration files.
+#
 # Every test gets its own scratch HOME and TMPDIR; nothing here reads the
 # developer's ~/.pi, ~/.tmux.conf, or any credential. A test that cannot run
 # reports SKIP (exit 77) instead of PASS, and a component that is not at the
@@ -29,6 +33,13 @@ repo="$(cd "$here/../.." && pwd)"
 export PI_BOOTSTRAP_FETCH=0
 [[ "${1:-}" == "--fetch" ]] && export PI_BOOTSTRAP_FETCH=1
 
+# Each test below gets its own scratch HOME and TMPDIR. Any agent-directory
+# override inherited from the caller is dropped for the same reason: it could
+# point a test at a real Pi installation. The real-runtime tests read the pinned
+# fixtures through PI_BOOTSTRAP_* instead, and test-default-stack copies the
+# directory it is given before touching it.
+drop_agent_overrides=(env -u PI_CODING_AGENT_DIR -u PI_AGENT_DIR)
+
 pass_count=0
 skip_count=0
 fail_count=0
@@ -40,7 +51,7 @@ run() {
 	shift
 	local isolation status=0
 	isolation="$(mktemp -d "${TMPDIR:-/tmp}/pi-bootstrap-run.XXXXXX")"
-	TMPDIR="$isolation" HOME="$isolation" "$@" || status=$?
+	"${drop_agent_overrides[@]}" TMPDIR="$isolation" HOME="$isolation" "$@" || status=$?
 	rm -rf "$isolation"
 	case "$status" in
 		0) pass_count=$((pass_count + 1)) ;;

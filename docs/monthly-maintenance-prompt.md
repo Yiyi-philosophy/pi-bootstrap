@@ -75,9 +75,14 @@ scripts/tests/run-all.sh
 What it runs (each in its own scratch `HOME`, with stubs and loopback mocks; a test that cannot run reports SKIP, never PASS):
 
 - `bash -n install.sh` and every `scripts/**/*.sh`; `shellcheck install.sh` when available
-- `scripts/check-embedded-extension.sh` (embedded `classifier-model.ts` byte-identical to the source)
+- `scripts/check-embedded-extension.sh` (embedded `classifier-model.ts` and `verify-stack.mjs` byte-identical to their sources)
+- `scripts/tests/test-version-matrix.mjs` (installer pins and the test harness agree)
+- `scripts/tests/test-rollback.sh` — every failure shape, including `SIGKILL` recovery on the next run and removal of files a failed run created
+- `scripts/tests/test-config-path.sh` — `/classifier-model` writes to Pi's agent directory, including a custom `PI_CODING_AGENT_DIR`, and mirrors to the path permission-modes reads
+- `scripts/tests/test-isolation-guards.mjs` — the suite refuses the real HOME and never writes an agent directory it is given
 - `scripts/tests/test-install-settings.sh` — stale-entry identity matching, unrelated packages, malformed settings, `pi remove` failure
 - `scripts/tests/test-install-run.sh` — fresh, repeat, upgrade from 1.0.2, pre-install source verification, tamper detection, rollback
+- `scripts/tests/test-real-upgrade.mjs` — the real-CLI upgrade/rollback acceptance test
 - `scripts/tests/test-install-lifecycle.mjs` — real Pi git install with and without `npm_config_ignore_scripts`
 - `scripts/tests/test-classifier-config.mjs` — merge, disable, timeout and permission preservation, invalid JSON, atomic writes, reload failure
 - `scripts/tests/test-permission-gate.mjs` — fail-closed, bounded retries, allow/deny, embedded commands, powershell, outside-cwd
@@ -86,7 +91,15 @@ What it runs (each in its own scratch `HOME`, with stubs and loopback mocks; a t
 - `scripts/tests/test-default-stack.mjs` — all five default extensions on one loader
 - `scripts/test-tmux.sh` — `3.1`, `3.2`, `3.3a`, `3.4`, `3.5`, `3.5a`, `3.6`, downgrade, no-trailing-newline, reload failure
 
-The real-runtime tests need Pi 1.4.0 and the pinned permission-modes source: set `PI_BOOTSTRAP_PI_PACKAGE` and `PI_BOOTSTRAP_PM_280`. Add `--fetch` to let them download fixtures. Never contact a real tmux server; the tmux test uses a stub.
+The real-runtime tests need the **exact** pinned matrix (Pi 1.4.0, permission-modes 2.8.0 at `cf77816`, pi-btw 0.62.0, advisor-flow 0.14.2). Set `PI_BOOTSTRAP_PI_PACKAGE`, `PI_BOOTSTRAP_PM_280`, and `PI_BOOTSTRAP_AGENT_DIR`; anything else reports SKIP, never PASS. Add `--fetch` to let them download fixtures. Never contact a real tmux server; the tmux test uses a stub.
+
+For a real upgrade acceptance run (network required), also set:
+
+```bash
+PI_BOOTSTRAP_REAL_UPGRADE=1 PI_BOOTSTRAP_ALLOW_NETWORK=1 scripts/tests/run-all.sh --fetch
+```
+
+That installs Pi 1.0.2 and the old extension versions from npm, fails a real `install.sh` after it has installed the new matrix, and checks with the real Pi 1.0.2 loader that the old packages load again.
 
 If you change the permission-modes pin, regenerate the manifest with the helper instead of editing it by hand — it verifies the checkout is clean and rewrites commit, tree, count, and file list together:
 

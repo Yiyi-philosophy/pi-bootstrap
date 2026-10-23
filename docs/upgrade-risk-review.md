@@ -1,6 +1,6 @@
-# Upgrade risk review — 2026-10-22 (Pi 1.4.0 matrix)
+# Upgrade risk review — 2026-10-22 matrix, updated 2026-10-23 (Pi 1.4.0)
 
-Risks, mitigations, and residual exposure for the recommended matrix. Severity reflects worst-case impact on users of this bootstrap. Updated by R2 ([`r2-closure-report.md`](r2-closure-report.md)), which closed the installer and test-coverage findings.
+Risks, mitigations, and residual exposure for the recommended matrix. Severity reflects worst-case impact on users of this bootstrap. Updated by R2 ([`r2-closure-report.md`](r2-closure-report.md)), which closed the installer and test-coverage findings, and by R3 ([`r3-closure-report.md`](r3-closure-report.md)), which made failure recovery actually restore a working environment.
 
 ## Source-built dependency
 
@@ -21,6 +21,14 @@ Risks, mitigations, and residual exposure for the recommended matrix. Severity r
 - Mitigations: (1) the pinned commit, tree, clean tree, and all 69 checksums are verified in an isolated staging clone **before** Pi is asked to install anything, so the code that would run is exactly the audited code; (2) managed installs export `npm_config_ignore_scripts=1`, so no `preinstall`/`install`/`postinstall`/`prepare` script runs; (3) the installed checkout is re-verified afterwards.
 - Evidence: `scripts/tests/test-install-lifecycle.mjs` runs the real Pi CLI twice against a probe package over localhost — with the variable no lifecycle script runs, without it all three run.
 - Residual: verification is of **content**, not of what the npm dependency tree pulls in at install time. `--omit=dev` limits this to runtime dependencies, and the pinned `package.json` declares only `peerDependencies`. A future pin with real `dependencies` would need the same review before adoption.
+
+## Custom agent directory
+
+**Risk (medium):** permission-modes 2.8.0 resolves its config from `$HOME/.pi/agent/permission-modes.json` and ignores Pi's `PI_CODING_AGENT_DIR`. With a custom directory, `/classifier-model` and the gate would read different files: the command appears to work while the classifier keeps the old selection (or no selection).
+
+- Mitigation: the extension resolves Pi's directory the way Pi does, writes the selection there, and mirrors the classifier block to the upstream path (preserving that file's unrelated settings). The upstream file's classifier block seeds the baseline on first use, so an existing model/timeout is not replaced by defaults.
+- Evidence: `scripts/tests/test-config-path.sh` (default HOME, custom/relative/trailing-slash/`~`, `PI_AGENT_DIR` ignored, mirror contents, reload persistence).
+- Residual: two files exist while a custom directory is in use. The mirror keeps them in agreement for changes made through `/classifier-model`; a hand edit of one file is not propagated.
 
 ## Classifier and permission-gate security
 
@@ -53,15 +61,19 @@ Risks, mitigations, and residual exposure for the recommended matrix. Severity r
 
 ## Installer behavior
 
-**Risk (medium if wrong):** upgrades must not remove another package, must not leave two permission-modes versions installed, and must not leave a half-activated matrix.
+**Risk (high if wrong):** a failed upgrade must leave the previous environment *working*, not merely inactive.
 
-- Mitigations:
-  - Stale entries are found by **Pi's package identity** (npm package name; git host+path without the ref), never by substring, and are removed with `pi remove` so Pi's own bookkeeping stays consistent. String and object entries are both handled; object entries with extra keys are a reported conflict, not a rewrite.
+- Rejected design: restoring `settings.json` only. `pi remove` deletes the old package files before it checks settings, and `npm install -g` replaces the global CLI in place, so a settings-only rollback could restore a configuration that points at files the failed run had already deleted. R2 shipped that design; R3 replaced it.
+- What the installer does now:
+  - Stale entries are found by **Pi's package identity** (npm package name; git host+path without the ref), never by substring. String and object entries are both handled; object entries with extra keys are a reported conflict, not a rewrite.
   - Malformed or ambiguous `settings.json` stops the install before any change (Pi would otherwise exit 0 after silently failing to persist, and a malformed `packages` entry crashes Pi at startup).
-  - A `pi remove` failure is fatal, never swallowed: Pi deletes package files before it checks settings, so a "not found" can have destroyed the install.
-  - `settings.json` is snapshotted and replaced extension files are backed up before the first change; any later failure restores them, which deactivates a partial matrix (the installed package files may remain on disk, but Pi only loads what settings lists).
-- Evidence: `scripts/tests/test-install-settings.sh` (14 cases: string/object entries, npm→git, version bumps, look-alike names, unrelated packages, six malformed inputs, remove failure, verify mode) and `scripts/tests/test-install-run.sh` (fresh, repeat, upgrade from 1.0.2, wrong commit, tampered tree, tampered file, missing file, rollback, post-rollback re-run, malformed settings).
-- Residual: `pi remove` leaves the old npm package's files on disk (unreferenced). Harmless; Pi only loads settings-referenced packages.
+  - The global Pi is installed into a staging prefix and version-checked, then activated by moving the old package aside and the new one into place. The old bin entry is saved byte-for-byte.
+  - `npm/` and `git/` are **moved** (not copied) into the backup directory and worked on as copies, so `pi remove` can only destroy the copy.
+  - `settings.json`, both extension files, `keybindings.json`, and `.tmux.conf` are recorded before they are written; files the run creates are recorded for removal.
+  - Failure detection uses one `EXIT` trap plus `set -e` and explicit `fail`, never an `ERR` trap (bash does not inherit `ERR` into functions, command substitutions, subshells, or pipelines). Signals have their own handler. A journal covers `SIGKILL`/power loss: the next run restores before doing anything else.
+  - Rollback is verified with the **real Pi extension loader**: the restored Pi must start, the restored packages must load, and the commands captured before the run must be registered again. Only then are the backups deleted; a failed verification keeps them and blocks the next run.
+- Evidence: `scripts/tests/test-install-settings.sh`, `test-install-run.sh`, `test-rollback.sh` (19 failure shapes, including `SIGKILL` recovery), and `test-real-upgrade.mjs` (real Pi 1.0.2 + registry packages, a real failed upgrade, and a real loader check afterwards).
+- Residual: a `SIGKILL` during the restore itself can leave a partial tree; the journal makes the next run retry, and nothing is discarded silently. Deleting `.pi-bootstrap/backup` by hand removes the ability to roll back automatically.
 
 **Risk (low):** raw-tag downloads of `minimal-mode.ts` could change if upstream re-tags `v1.4.0`.
 
@@ -77,4 +89,4 @@ Risks, mitigations, and residual exposure for the recommended matrix. Severity r
 
 ## Rollback
 
-Documented in `upgrade-audit-2026-10.md`; the previous matrix is preserved at commit `c327aaa8975bf9d0ae89112b113cf6fd244ffe49`. Automatic rollback covers failure *during* a run; rolling back to the previous matrix afterwards is manual and does not touch user configuration.
+Automatic rollback covers failure *during* a run and is verified with the real Pi loader (see above). After a successful commit there is no automatic way back: rolling back to the previous matrix is manual (`pi install` the old sources), and the previous matrix is preserved at commit `c327aaa8975bf9d0ae89112b113cf6fd244ffe49`. User configuration (`permission-modes.json`, `advisor.json`, `auth.json`, `models.json`) is never written by the installer, so it is not part of either direction.

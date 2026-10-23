@@ -1,19 +1,27 @@
 # Tested versions
 
-Last verified: 2026-10-22
+Last verified: 2026-10-23
 
-Status key: **PASS** = installed and exercised; **TESTED (load)** = installs and loads with registration verified, core behavior not exercised; **SKIP** = not run in that environment; **UNVERIFIED** = not exercised at all. Every PASS below is backed by a committed script in [`scripts/tests/`](scripts/tests); run `scripts/tests/run-all.sh` to reproduce, and read [`docs/r2-closure-report.md`](docs/r2-closure-report.md) for the most recent results.
+Status key: **PASS** = installed and exercised; **TESTED (load)** = installs and loads with registration verified, core behavior not exercised; **SKIP** = not run in that environment; **UNVERIFIED** = not exercised at all. Every PASS below is backed by a committed script in [`scripts/tests/`](scripts/tests); run `scripts/tests/run-all.sh` to reproduce, and read [`docs/r3-closure-report.md`](docs/r3-closure-report.md) for the most recent results (R2 results remain in [`docs/r2-closure-report.md`](docs/r2-closure-report.md)).
+
+The real-runtime rows require the **exact** versions below. A newer Pi or extension is reported as SKIP, not PASS: these tests assert the combination this repository ships. `scripts/tests/test-version-matrix.mjs` keeps `install.sh` and the test harness on the same pins.
 
 ## Default stack
 
 | Component | Version | Source | Status |
 |---|---:|---|---|
-| Pi Coding Agent | 1.4.0 | npm | PASS: isolated install, RPC startup and command invocation (`test-rpc-smoke.mjs`), extension loading under Node 24.14.0; TUI startup verified interactively in the 2026-10 audit, not by a committed test |
-| permission-modes | 2.8.0 | pinned upstream commit `cf77816f28e102409dddbf8e537e4cf57aa092f0` (git source, **not an npm release**) | PASS: installed via `pi install git:…@<sha>`, pre- and post-install verification against commit + tree + 69-file SHA256 manifest; gate and classifier tests in `scripts/tests/` |
+| Pi Coding Agent | 1.4.0 | npm | PASS: isolated install, RPC startup and command invocation (`test-rpc-smoke.mjs`), extension loading under Node 24.14.0; staged install + activation and rollback to 1.0.2 verified with the real CLI (`test-real-upgrade.mjs`); TUI startup verified interactively in the 2026-10 audit, not by a committed test |
+| permission-modes | 2.8.0 | pinned upstream commit `cf77816f28e102409dddbf8e537e4cf57aa092f0` (git source, **not an npm release**) | PASS: installed via `pi install git:…@<sha>`, pre- and post-install verification against commit + tree + 69-file SHA256 manifest; gate and classifier tests in `scripts/tests/`; real upgrade from the 2.7.0 npm package and back (`test-real-upgrade.mjs`) |
 | pi-btw | 0.62.0 | npm | PASS: installed and registered `/btw` (`test-default-stack.mjs`); TUI side question completed against a loopback fixture during the 2026-10 audit (interactive, no committed test) |
 | pi-advisor-flow | 0.14.2 | npm | PASS: `/advisor`, `/advisor-models`, `/advisor-settings`, `/advisor-stats` registered (`test-default-stack.mjs`); selector save, no-credential error path, and a full `ask_advisor` consultation against a loopback fixture were verified interactively in the 2026-10 audit, not by a committed test |
-| classifier-model | repository version (unchanged) | local | PASS: registered under Pi 1.4.0; JSON-safety battery committed as `test-classifier-config.mjs` (merge, disable, timeouts, permissions, invalid JSON, atomic writes, reload, unwritable directory) |
+| classifier-model | repository version (changed in R3: agent-directory resolution) | local | PASS: registered under Pi 1.4.0; JSON-safety battery committed as `test-classifier-config.mjs`; config-path battery committed as `test-config-path.sh` (custom `PI_CODING_AGENT_DIR`, `PI_AGENT_DIR` ignored, mirror to the upstream path, reload) |
 | minimal-mode.ts | Pi v1.4.0 tag | raw tag URL | PASS: exact tag URL fetched; SHA256 `040cbc76…a8770` pinned and verified |
+
+## Upgrade safety (R3)
+
+- **Failure recovery is exercised, not asserted.** `scripts/tests/test-rollback.sh` fails a run at 19 distinct points (after backup, after `pi remove`, after new packages, after verification, after extensions, while writing keybindings, after tmux, at the last step, inside a nested function's command substitution, in a failing pipeline, in a subshell, and on `SIGINT`/`SIGTERM`/`SIGKILL`) and checks that settings, both extensions, keybindings and `.tmux.conf` are byte-identical, that the old packages and the old `pi` binary are back, and that the failed run's files are gone. The `SIGKILL` case proves the next invocation restores the environment before doing anything else.
+- **Real-CLI acceptance.** `scripts/tests/test-real-upgrade.mjs` (`PI_BOOTSTRAP_REAL_UPGRADE=1`, needs npm + GitHub) installs Pi 1.0.2 with permission-modes 2.7.0, pi-btw 0.61.1 and advisor-flow 0.11.0 from the registry, fails the real installer after it installed the 1.4.0 matrix, and then proves with the real Pi 1.0.2 extension loader that all three old packages load again; a clean re-run then verifies the pinned matrix.
+- **Boundaries.** Rollback restores what existed when the run started. It cannot undo a `SIGKILL` in the middle of the restore itself (the journal makes the next run retry), and it does not touch `permission-modes.json`, `advisor.json`, `auth.json`, or `models.json`.
 
 ## Compatibility notes
 

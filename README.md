@@ -57,8 +57,30 @@ The installer also merges `app.thinking.cycle = "ctrl+shift+tab"` into `~/.pi/ag
 2. **Pre-install source verification.** The pinned permission-modes commit is fetched into a temporary staging repository and checked for the exact commit, the exact git tree, a clean working tree, and all 69 file checksums *before* Pi is asked to install it.
 3. **No lifecycle scripts.** Pi's git install would otherwise run the package's `npm install` with `preinstall`/`install`/`postinstall`/`prepare` enabled and offers no flag to disable them (verified against Pi 1.4.0 with a probe package; see [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md)). The installer exports `npm_config_ignore_scripts=1` for managed installs. Both npm packages and the pinned source ship prebuilt files, so nothing is lost.
 4. **Exact migration.** Stale entries for the three managed packages are identified by Pi's own package identity (npm package name; git host and path without the ref), never by substring. Unrelated packages, local paths, and look-alike names are left alone. Entries carrying extra keys are reported as conflicts instead of being rewritten.
-5. **Post-install verification.** The installed checkout is re-verified (commit, tree, clean tree, 69 checksums), and `settings.json` must list exactly the pinned sources; `pi install` can otherwise exit 0 after silently failing to persist.
-6. **Rollback.** A failure after the first change restores `settings.json` and any replaced extension files, so no half-activated matrix remains.
+5. **Post-install verification.** The installed checkout is re-verified (commit, tree, clean tree, 69 checksums); the installed versions must equal the pins exactly; `settings.json` must list exactly the pinned sources; and the real Pi loader must load every managed package and register the expected commands. `pi install` can otherwise exit 0 after silently failing to persist.
+6. **Transactional upgrade, verified rollback.** See below.
+
+### What a failed upgrade leaves behind
+
+The installer treats the upgrade as a transaction. Before the first destructive step it writes a journal and takes immutable backups:
+
+| What | How |
+|---|---|
+| Global `pi` CLI | installed into a throwaway prefix, version-checked, then activated by moving the old package aside and the new one into place (`rename`, same filesystem). The old bin entry is saved byte-for-byte. |
+| Managed npm/git trees | `~/.pi/agent/npm` and `~/.pi/agent/git` are **moved** aside and worked on as copies, so `pi remove` deleting the old packages cannot destroy the backup. |
+| `settings.json` | copied to `.pi-bootstrap/backup/`; absence is recorded too. |
+| `extensions/classifier-model.ts`, `extensions/minimal-mode.ts`, `keybindings.json`, `.tmux.conf` | each replaced file is copied; each file the run would create is recorded so it can be removed again. |
+
+If anything fails, the moved trees and the old Pi package are moved back, every recorded file is restored, files the run created are deleted, and the installer then **proves the result with the real Pi extension loader**: Pi starts, the managed packages load, and the commands the previous installation registered are registered again. Only then are the backups deleted. If verification fails, the backups are kept and the next run refuses to start until the failed rollback is resolved.
+
+Failure detection does not rely on a Bash `ERR` trap, which is not inherited by functions, command substitutions, subshells, or pipelines. A single `EXIT` trap plus `set -e` covers every in-process exit path; `INT`/`TERM`/`HUP` get their own handler; and the journal covers `SIGKILL` and power loss, where no trap can run — the next invocation restores the interrupted environment before doing anything else.
+
+**Boundaries, stated rather than implied:**
+
+- A `SIGKILL` or power loss *during* the restore itself can leave a partially restored tree. The journal and backups remain, so the next run retries; nothing is silently discarded.
+- Rollback restores the files and the CLI that existed when the run started. It does not revert anything a *previous* run did, and it does not restore `permission-modes.json`, `advisor.json`, `auth.json`, or `models.json` — the installer never writes them.
+- The verification step needs a real Pi package with an extension loader. With a stub or a non-standard Pi build it can only report that nothing could be proven; a real install fails rather than claiming success (the test suite opts in explicitly).
+- If the backups themselves are deleted, the previous environment cannot be reconstructed automatically.
 
 ## Model configuration
 
@@ -111,19 +133,22 @@ pi install npm:@narumitw/pi-lsp@<TESTED_VERSION>
 
 The installer is idempotent. It creates `~/.pi/agent/extensions/` as needed, atomically merges JSON objects, keeps unrelated fields, and refuses to replace malformed JSON. It never edits `auth.json` or `models.json`, changes shell profiles, installs sudo packages, enables bypass mode, or installs optional extensions. `npm install -g` for Pi itself uses `--ignore-scripts`.
 
-It writes only inside `~/.pi/agent`:
+It writes only inside `~/.pi/agent` and the active npm global prefix:
 
 - `settings.json` (managed package entries, via `pi install` / `pi remove`)
 - `extensions/classifier-model.ts`, `extensions/minimal-mode.ts`
 - `keybindings.json` (one key)
 - `git/…` and `npm/…` (Pi's own package storage)
-- `.pi-bootstrap/` (this run's `settings.json` snapshot and restored-file backups)
+- `.pi-bootstrap/` (this run's journal, snapshots, moved package trees, and restored-file backups; removed when the run commits or verifies its rollback)
+- the global Pi package directory and `bin/pi` link, replaced by the staged install (the previous ones are backed up under `.pi-bootstrap/`)
 
-The local extension writes only this file when the user selects a classifier:
+The local extension writes `permission-modes.json` in **Pi's** agent directory — the same directory `PI_CODING_AGENT_DIR` selects, defaulting to `~/.pi/agent`:
 
 ```text
-~/.pi/agent/permission-modes.json
+$PI_CODING_AGENT_DIR/permission-modes.json     # default: ~/.pi/agent/permission-modes.json
 ```
+
+permission-modes 2.8.0 itself resolves its config from `$HOME/.pi/agent/permission-modes.json` and ignores `PI_CODING_AGENT_DIR`. When those two paths differ, `/classifier-model` writes the selection to Pi's directory and mirrors the classifier block to the path permission-modes reads, so the gate cannot keep using a different file. The historical `PI_AGENT_DIR` variable is ignored here exactly as Pi ignores it (the installer accepts it for its own paths and translates it for the `pi` process it drives).
 
 A missing classifier timeout defaults to 60000 ms; an existing `timeoutMs` is retained. Successful changes invoke Pi's supported `ctx.reload()` API. If reload fails, the command saves the file and asks the user to run `/reload`.
 
@@ -135,7 +160,7 @@ scripts/check-embedded-extension.sh
 
 ## Upgrade policy
 
-Monthly maintenance starts by finding the newest stable Pi and stable releases of the default and optional extensions. It checks package metadata, peer dependencies, changelogs, Pi release documentation, and the exact Pi-bound files. If any core component is incompatible, the previous confirmed-good matrix remains in place. The maintenance instructions are in [`docs/monthly-maintenance-prompt.md`](docs/monthly-maintenance-prompt.md); the 2026-10 upgrade evidence is in [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md) and [`docs/upgrade-risk-review.md`](docs/upgrade-risk-review.md); the R2 engineering closure is in [`docs/r2-closure-report.md`](docs/r2-closure-report.md).
+Monthly maintenance starts by finding the newest stable Pi and stable releases of the default and optional extensions. It checks package metadata, peer dependencies, changelogs, Pi release documentation, and the exact Pi-bound files. If any core component is incompatible, the previous confirmed-good matrix remains in place. The maintenance instructions are in [`docs/monthly-maintenance-prompt.md`](docs/monthly-maintenance-prompt.md); the 2026-10 upgrade evidence is in [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md) and [`docs/upgrade-risk-review.md`](docs/upgrade-risk-review.md); the R2 engineering closure is in [`docs/r2-closure-report.md`](docs/r2-closure-report.md), and the R3 upgrade-safety closure in [`docs/r3-closure-report.md`](docs/r3-closure-report.md).
 
 ## Upstream API verification
 
@@ -148,7 +173,9 @@ scripts/tests/run-all.sh           # everything available offline
 scripts/tests/run-all.sh --fetch   # also download test fixtures
 ```
 
-Each test runs with its own scratch `HOME`, stubbed `pi`/`npm`/`curl`/`tmux`, and loopback mock servers; none reads the real `~/.pi`, and none needs a credential. Tests that cannot run report `SKIP`, never a false `PASS`.
+Each test runs with its own scratch `HOME` and `TMPDIR`, stubbed `pi`/`npm`/`curl`/`tmux`, and loopback mock servers; none reads the real `~/.pi`, and none needs a credential. The suite refuses to run against the real home directory, drops inherited `PI_CODING_AGENT_DIR`/`PI_AGENT_DIR` for every test, and `test-default-stack.mjs` copies any agent directory it is given before touching it.
+
+Tests that cannot run report `SKIP`, never a false `PASS`. Real-runtime tests also SKIP when the installed component is **not exactly** the pinned version (Pi 1.4.0, permission-modes 2.8.0 at `cf77816`, pi-btw 0.62.0, advisor-flow 0.14.2); a newer version is not "good enough", because it would make a PASS mean something this repository never tested.
 
 | Suite | Covers |
 |---|---|
@@ -160,7 +187,21 @@ Each test runs with its own scratch `HOME`, stubbed `pi`/`npm`/`curl`/`tmux`, an
 | `scripts/tests/test-classifier-baseurl.mjs` | 2.7.0 misroutes / 2.8.0 honors the auth-resolved `baseUrl` (real `ModelRegistry`) |
 | `scripts/tests/test-rpc-smoke.mjs` | headless Pi start plus command registration and invocation |
 | `scripts/tests/test-default-stack.mjs` | all five default extensions on one real loader |
+| `scripts/tests/test-rollback.sh` | every failure shape: after backup/removal/install/verification/keybindings/tmux/last step, nested function in `$( )`, failing pipeline, failing subshell, `SIGINT`, `SIGTERM`, `SIGKILL` + recovery on the next run, created files removed, customised keybindings/tmux restored |
+| `scripts/tests/test-config-path.sh` | `/classifier-model` path: default HOME, custom/relative/trailing-slash/`~` `PI_CODING_AGENT_DIR`, `PI_AGENT_DIR` ignored, mirror to the upstream path, persistence across reload |
+| `scripts/tests/test-isolation-guards.mjs` | the suite refuses the real HOME and an agent dir outside it; default-stack SKIPs a mismatched stack and never writes the given directory |
+| `scripts/tests/test-version-matrix.mjs` | `install.sh` and `lib-pi.mjs` agree on every pin, and the embedded verifier matches its source |
+| `scripts/tests/test-real-upgrade.mjs` | **real CLI**: Pi 1.0.2 + 2.7.0/0.61.1/0.11.0 from npm, install.sh fails after installing 1.4.0/2.8.0, Pi 1.0.2 loads every restored package again, then a clean run verifies the pinned matrix (opt-in: `PI_BOOTSTRAP_REAL_UPGRADE=1`) |
 | `scripts/test-tmux.sh` | tmux `3.1`, `3.2`, `3.3a`, `3.4`, `3.5`, `3.5a`, `3.6`, downgrade, no-trailing-newline, reload failure |
-| `scripts/check-embedded-extension.sh` | embedded `classifier-model.ts` is byte-identical to the repository source |
+| `scripts/check-embedded-extension.sh` | embedded `classifier-model.ts` and `verify-stack.mjs` are byte-identical to their sources (`--write` regenerates them) |
 
-The real-runtime tests need Pi 1.4.0 and the pinned permission-modes source; set `PI_BOOTSTRAP_PI_PACKAGE` and `PI_BOOTSTRAP_PM_280` (or `PI_BOOTSTRAP_AGENT_DIR`) to point at them, or the suite reports those as skipped.
+The real-runtime tests need Pi 1.4.0 and the pinned permission-modes source; set `PI_BOOTSTRAP_PI_PACKAGE` and `PI_BOOTSTRAP_PM_280` to point at them, or the suite reports those as skipped.
+
+### CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs two jobs:
+
+- **static checks and offline suite** — no network, no Pi: `bash -n`, ShellCheck, the embedded-source check, the pin-matrix check, and the whole stubbed installer/extension suite. This gate must always be green.
+- **real pinned matrix** — installs the pinned Pi and permission-modes commit, then runs the real-runtime tests, the real upgrade/rollback acceptance test, and ShellCheck. Tests whose prerequisite cannot be met report SKIP; the job fails only on a real failure.
+
+No secrets are used and nothing is published.

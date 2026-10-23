@@ -1,0 +1,108 @@
+name: CI
+
+# Two jobs, deliberately separate:
+#
+#   static-and-offline  no network and no Pi: syntax, shellcheck, the embedded
+#                       source check, the pin-matrix check, and the whole
+#                       stubbed installer/extension suite. This is the gate that
+#                       must always be green.
+#
+#   real-matrix         installs the exact pinned Pi from npm and runs the
+#                       real-runtime tests, the real upgrade/rollback acceptance
+#                       test, and shellcheck. Anything whose prerequisite cannot
+#                       be met reports SKIP (exit 77) rather than PASS; the job
+#                       fails only on a real failure.
+#
+# No secrets are used and nothing is published.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static-and-offline:
+    name: static checks and offline suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck --version
+
+      - name: bash syntax
+        run: |
+          bash -n install.sh
+          for script in scripts/*.sh scripts/tests/*.sh scripts/tests/fixtures/*.sh; do
+            bash -n "$script"
+          done
+
+      - name: embedded sources and pin matrix
+        run: |
+          scripts/check-embedded-extension.sh
+          scripts/tests/test-version-matrix.sh
+
+      - name: offline suite
+        run: scripts/tests/run-all.sh
+
+  real-matrix:
+    name: real pinned matrix
+    runs-on: ubuntu-latest
+    needs: static-and-offline
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+
+      - name: install the pinned Pi
+        run: |
+          npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.4.0
+          pi --version
+
+      - name: fetch the pinned permission-modes commit
+        run: |
+          git init --quiet /tmp/pm-280
+          git -C /tmp/pm-280 remote add origin https://github.com/GeorgeDong32/pi-permission-modes
+          git -C /tmp/pm-280 fetch --quiet --depth 1 origin cf77816f28e102409dddbf8e537e4cf57aa092f0
+          git -C /tmp/pm-280 -c advice.detachedHead=false checkout --quiet FETCH_HEAD
+
+      - name: build an agent directory with the pinned stack
+        run: |
+          export PI_CODING_AGENT_DIR="$GITHUB_WORKSPACE/.ci-agent"
+          mkdir -p "$PI_CODING_AGENT_DIR/extensions"
+          export npm_config_ignore_scripts=1
+          pi install npm:@narumitw/pi-btw@0.62.0
+          pi install npm:pi-advisor-flow@0.14.2
+          pi install "git:github.com/GeorgeDong32/pi-permission-modes@cf77816f28e102409dddbf8e537e4cf57aa092f0"
+          cp extensions/classifier-model.ts "$PI_CODING_AGENT_DIR/extensions/"
+          curl -fsSL "https://raw.githubusercontent.com/earendil-works/pi/v1.4.0/packages/coding-agent/examples/extensions/minimal-mode.ts" \
+            -o "$PI_CODING_AGENT_DIR/extensions/minimal-mode.ts"
+          echo "$PI_CODING_AGENT_DIR" > /tmp/agent-dir
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning install.sh scripts/*.sh scripts/tests/*.sh scripts/tests/fixtures/*.sh
+
+      - name: real-runtime suite and upgrade acceptance
+        env:
+          PI_BOOTSTRAP_PM_280: /tmp/pm-280
+          PI_BOOTSTRAP_REAL_UPGRADE: "1"
+          PI_BOOTSTRAP_ALLOW_NETWORK: "1"
+        run: |
+          export PI_BOOTSTRAP_AGENT_DIR="$(cat /tmp/agent-dir)"
+          # Resolve the global Pi explicitly: the npm prefix differs by runner.
+          export PI_BOOTSTRAP_PI_PACKAGE="$(npm root -g)/@earendil-works/pi-coding-agent"
+          scripts/tests/run-all.sh --fetch
