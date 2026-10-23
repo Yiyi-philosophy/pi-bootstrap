@@ -286,8 +286,9 @@ This must be reported as a failure of the execution policy, not as a code issue.
 | `93c0fff` | simplify the bin-entry restore |
 | `e130bff` | this report (`docs/r3-closure-report.md`) |
 | `a0bd9c0` | records `e130bff` in the table above |
+| `30312ac` | lists the report commits (this table) |
 
-Nothing was pushed, merged, tagged, or published. No pin was changed.
+HEAD is `30312ac`; the tree is clean and nothing was pushed, merged, tagged, or published. No pin was changed.
 
 ## Verdict
 
