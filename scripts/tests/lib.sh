@@ -35,10 +35,23 @@ real_home() {
 	printf '%s\n' "${entry%/}"
 }
 
-# Collapse "." and ".." in a path the way the kernel would. Valid for a path
-# whose leading part is already physical, which is how physical_path() calls it:
-# the missing tail is then resolved lexically, so `HOME/new/../../outside` ends
-# up outside HOME instead of passing the prefix check verbatim.
+# True when PATH contains a ".." component. Such a path is refused everywhere
+# below rather than resolved: the kernel resolves ".." *after* following the
+# symlink in front of it, so no lexical collapse reproduces where a write would
+# land (see physical_path()).
+contains_dotdot() {
+	case "/$1/" in
+		*"/../"*) return 0 ;;
+	esac
+	return 1
+}
+
+# Collapse "." and repeated "/" in a path. Valid for a path whose leading part
+# is already physical, which is how physical_path() calls it. It also collapses
+# ".." as defense in depth, but physical_path() refuses a path containing one
+# before calling it: `HOME/new/../agent-link` (new missing, agent-link a symlink
+# outside HOME) collapses to `HOME/agent-link`, which is not where the kernel
+# would write.
 lexical_path() {
 	local path="$1" out="" comp
 	local IFS=/
@@ -59,15 +72,22 @@ lexical_path() {
 # therefore resolves to the real home and is caught by the guards below instead
 # of passing a textual "it is under TMPDIR" check.
 #
-# Resolution fails closed (non-zero, no output) when a component that exists is
-# a symlink that does not resolve - dangling or cyclic. Such a path cannot be
-# proven to stay inside a scratch tree, so it must not be treated as a plain
-# nonexistent path. Only a missing tail that is not a symlink is appended;
-# PI_CODING_AGENT_DIR is normally created after this guard runs.
+# Resolution fails closed (non-zero, no output) when:
+#   * the path contains a ".." component. The kernel applies ".." *after*
+#     following the symlink in front of it, so `HOME/new/../agent-link` (new
+#     missing, agent-link a symlink out of HOME) writes through agent-link while
+#     every lexical collapse names HOME/agent-link. No lexical normalization can
+#     prove where such a path lands, so it is refused outright;
+#   * a component that exists is a symlink that does not resolve - dangling or
+#     cyclic. Such a path cannot be proven to stay inside a scratch tree, so it
+#     must not be treated as a plain nonexistent path.
+# Only a missing tail without ".." is appended; PI_CODING_AGENT_DIR is normally
+# created after this guard runs.
 physical_path() {
 	local target="$1" suffix="" resolved
 	target="${target%/}"
 	[[ -n "$target" ]] || target="/"
+	contains_dotdot "$target" && return 1
 	while :; do
 		if [[ -e "$target" ]]; then
 			resolved="$(cd -P -- "$target" 2>/dev/null && pwd -P)" || return 1
@@ -99,7 +119,7 @@ require_scratch_home() {
 			fail_test "refusing to run: the real home $real_raw has a path that does not resolve; the isolation guard cannot prove anything"
 	fi
 	home_physical="$(physical_path "$home")" ||
-		fail_test "refusing to run with HOME=$home: it is or contains a symlink that does not resolve (dangling or cyclic), so it cannot be proven to be a scratch directory"
+		fail_test "refusing to run with HOME=$home: it contains a '..' component or a symlink that does not resolve (dangling or cyclic), so it cannot be proven to be a scratch directory"
 	if [[ -n "$real" ]]; then
 		# Both spellings are checked: a lexical match catches a plain path, and
 		# the physical one catches `HOME=/tmp/x` where /tmp/x is a symlink to the
@@ -123,7 +143,7 @@ require_scratch_home() {
 			*) agent="$PWD/$agent" ;;
 		esac
 		agent_physical="$(physical_path "$agent")" ||
-			fail_test "refusing to run: PI_CODING_AGENT_DIR=$agent is or contains a symlink that does not resolve (dangling or cyclic), so it cannot be proven to be inside HOME=$home"
+			fail_test "refusing to run: PI_CODING_AGENT_DIR=$agent contains a '..' component or a symlink that does not resolve (dangling or cyclic), so it cannot be proven to be inside HOME=$home"
 		for candidate in "$agent" "$agent_physical"; do
 			case "$candidate" in
 				"$home" | "$home"/* | "$home_physical" | "$home_physical"/*) ;;

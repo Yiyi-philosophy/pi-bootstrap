@@ -133,25 +133,77 @@ function run(command, args, env) {
 		PI_CODING_AGENT_DIR: `${home}/new/../../outside`,
 	});
 	assert.notEqual(dotDotEscape.status, 0, "a missing segment followed by .. must not escape HOME");
-	assert.match(dotDotEscape.stderr, /is outside HOME/, `dot-dot refusal is explicit: ${dotDotEscape.stderr}`);
 	assert.doesNotMatch(dotDotEscape.stdout, /REACHED/, "the run stopped at the guard");
 	assert.equal(fs.existsSync(path.join(scratch, "outside")), false, "the guard created nothing outside HOME");
 
-	// ...but ".." that stays inside HOME must still be accepted, and a missing
-	// agent directory is still created after the guard runs.
+	// H1: the write-through the lexical collapse could not see. The kernel walks
+	// a path component by component: it creates the missing "new", applies "..",
+	// and only then follows "agent-link" - so the write lands in `outside`, while
+	// every lexical interpretation of the path names $HOME/agent-link, which is
+	// inside HOME. A prefix check therefore cannot be trusted for any path that
+	// contains "..", so such paths are refused outright (fail closed).
+	const h1 = path.join(scratch, "h1");
+	const h1Home = path.join(h1, "home");
+	const h1Outside = path.join(h1, "outside");
+	fs.mkdirSync(h1Home, { recursive: true });
+	fs.mkdirSync(h1Outside, { recursive: true });
+	fs.symlinkSync(h1Outside, path.join(h1Home, "agent-link"));
+
+	// The probe writes only after the guard has accepted, so its filesystem
+	// state proves whether the guard's decision matched where a write would go.
+	const writeProbe = path.join(scratch, "write-probe.sh");
+	fs.writeFileSync(
+		writeProbe,
+		[
+			"#!/usr/bin/env bash",
+			`source ${JSON.stringify(path.join(here, "lib.sh"))}`,
+			"require_scratch_home",
+			'mkdir -p "$PI_CODING_AGENT_DIR"',
+			': >"$PI_CODING_AGENT_DIR/written-by-test"',
+			"echo REACHED",
+			"",
+		].join("\n"),
+	);
+	fs.chmodSync(writeProbe, 0o755);
+
+	const writeThrough = run("bash", [writeProbe], {
+		HOME: h1Home,
+		TMPDIR: tmpRoot,
+		PI_CODING_AGENT_DIR: `${h1Home}/new/../agent-link`,
+	});
+	assert.notEqual(writeThrough.status, 0, "a missing segment followed by .. and a symlink must be refused");
+	assert.match(writeThrough.stderr, /\.\.|does not resolve/, `refusal is explicit: ${writeThrough.stderr}`);
+	assert.doesNotMatch(writeThrough.stdout, /REACHED/, "the run stopped before writing");
+	assert.deepEqual(fs.readdirSync(h1Outside), [], "nothing was written outside HOME through the symlink");
+	assert.equal(fs.existsSync(path.join(h1Home, "new")), false, "the refused run created no intermediate directory");
+	assert.equal(fs.existsSync(path.join(h1Home, "written-by-test")), false, "nothing was written inside HOME either");
+
+	// Control: the same link reached without ".." is a plain missing path inside
+	// HOME and is still allowed - the refusal is about "..", not about symlinks.
+	const control = run("bash", [writeProbe], {
+		HOME: h1Home,
+		TMPDIR: tmpRoot,
+		PI_CODING_AGENT_DIR: path.join(h1Home, "new-agent"),
+	});
+	assert.equal(control.status, 0, `a plain missing directory inside HOME is still allowed: ${control.stderr}`);
+	assert.match(control.stdout, /REACHED/, "the run continued for a plain missing directory");
+	assert.equal(fs.existsSync(path.join(h1Home, "new-agent/written-by-test")), true, "the allowed path was written where the guard said it would be");
+
+	// Even a ".." that happens to stay inside HOME is refused: the guard does not
+	// try to decide which combinations of ".." and symlinks are safe.
 	const dotDotInside = run("bash", [probe], {
 		HOME: home,
 		TMPDIR: tmpRoot,
 		PI_CODING_AGENT_DIR: `${home}/new/../.pi/agent`,
 	});
-	assert.equal(dotDotInside.status, 0, `a ".." that stays inside HOME is allowed: ${dotDotInside.stderr}`);
-	assert.match(dotDotInside.stdout, /REACHED/, "the run continued for an in-HOME missing path");
+	assert.notEqual(dotDotInside.status, 0, "a path with .. is refused even when it would stay inside HOME");
+	assert.doesNotMatch(dotDotInside.stdout, /REACHED/, "the run stopped at the guard");
 
 	assert.equal(fs.existsSync(danglingOutside), false, "the guard created no link target");
 	console.log("PASS isolation: lib.sh refuses a non-scratch HOME and an agent dir outside it");
 	console.log("PASS isolation: lib.sh refuses symlink escapes for HOME and for the agent directory");
 	console.log("PASS isolation: lib.sh fails closed on dangling and cyclic symlinks");
-	console.log("PASS isolation: lib.sh resolves missing segments before comparing against HOME");
+	console.log("PASS isolation: lib.sh refuses any '..' path instead of collapsing it (no write-through)");
 }
 
 // --- 2. the classifier battery refuses a production agent directory --------

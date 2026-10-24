@@ -1944,28 +1944,58 @@ configure_tmux() {
 	echo "For modified-key changes to be guaranteed active, restart the tmux server after saving your sessions."
 }
 
-# Compare two paths the way the kernel would, resolving symlinks in the part
-# that exists and keeping the rest lexical, so `~/x`, `x/`, a relative path and
-# a symlink to the same directory all compare equal (and a symlink pointing
-# somewhere else does not).
-same_directory() {
-	node -e '
-		const path = require("node:path");
-		const fs = require("node:fs");
-		const real = (p) => {
-			let base = path.resolve(p);
-			const rest = [];
-			while (!fs.existsSync(base)) {
-				const parent = path.dirname(base);
-				if (parent === base) break;
-				rest.unshift(path.basename(base));
-				base = parent;
-			}
-			try { base = fs.realpathSync(base); } catch {}
-			return path.join(base, ...rest);
-		};
-		process.exit(real(process.argv[1]) === real(process.argv[2]) ? 0 : 1);
-	' "$1" "$2"
+# Print the physical path of DIR, failing closed (non-zero, no output).
+#
+# This decides whether AGENT_DIR names the same directory as $HOME/.pi/agent,
+# and it must agree with where the kernel would actually write, because every
+# later step uses the RAW $AGENT_DIR. The kernel walks a path one component at a
+# time: it follows a symlink and only then applies the ".." that follows it. A
+# lexical collapse (path.resolve, `realpath -m`) does the opposite, so
+# `$HOME/escape/../.pi/agent` (escape a symlink to another directory) collapses
+# to the default directory while writes land in the symlink target. Rather than
+# model that order, such a path is refused: the supported shapes are the default
+# directory, a plain path without "..", and a symlink to the default directory.
+# A component that exists as a symlink but does not resolve (dangling or cyclic)
+# is refused for the same reason - it cannot be proven where it leads.
+#
+# The tail that does not exist yet is appended after dropping "." and repeated
+# "/" only: it contains no ".." (checked above) and therefore no symlink either.
+# Mirrors physical_path() in scripts/tests/lib.sh; keep the two semantics
+# identical.
+physical_dir_path() {
+	local target="$1" suffix="" resolved component
+	case "$target" in
+		/*) ;;
+		*) target="$PWD/$target" ;;
+	esac
+	target="${target%/}"
+	[[ -n "$target" ]] || target="/"
+	case "/$target/" in
+		*"/../"*) return 1 ;;
+	esac
+	while :; do
+		if [[ -e "$target" ]]; then
+			resolved="$(cd -P -- "$target" 2>/dev/null && pwd -P)" || return 1
+			# The separator is already there at the filesystem root, so a missing
+			# "/a/b" would otherwise come out as "//a/b".
+			if [[ "$resolved" == "/" ]]; then
+				printf '%s\n' "${suffix:-/}"
+			else
+				printf '%s\n' "$resolved$suffix"
+			fi
+			return 0
+		elif [[ -L "$target" ]]; then
+			return 1
+		fi
+		[[ "$target" != "/" ]] || return 1
+		# "." and repeated "/" are dropped here, which is the same thing the
+		# kernel does; ".." cannot appear (refused above).
+		component="$(basename "$target")"
+		if [[ "$component" != "." && "$component" != "/" ]]; then
+			suffix="/$component$suffix"
+		fi
+		target="$(dirname "$target")"
+	done
 }
 
 # permission-modes 2.8.0 resolves *every* user file from homedir() -
@@ -1982,7 +2012,14 @@ same_directory() {
 # the gate reads directory B. Failing closed before any mutation is the only
 # honest option: the alternative is an install that looks protected and is not.
 require_supported_agent_dir() {
-	same_directory "$AGENT_DIR" "$HOME/.pi/agent" && return 0
+	local agent_physical default_physical
+	agent_physical="$(physical_dir_path "$AGENT_DIR")" ||
+		fail "$AGENT_DIR is UNSUPPORTED: it contains a '..' component or a symlink that does not resolve (dangling or cyclic), so it cannot be proven to be the same directory the installer would write to and the one permission-modes ${PERMISSION_MODES_VERSION} reads. Use the default agent directory (unset PI_AGENT_DIR and PI_CODING_AGENT_DIR), or a path without '..' that is either \$HOME/.pi/agent itself or a symlink to it. Nothing was changed."
+	default_physical="$(physical_dir_path "$HOME/.pi/agent")" ||
+		fail "could not resolve the default agent directory $HOME/.pi/agent; nothing was changed"
+	if [[ "$agent_physical" == "$default_physical" ]]; then
+		return 0
+	fi
 	fail "$AGENT_DIR is UNSUPPORTED: Pi would run with this agent directory, but permission-modes ${PERMISSION_MODES_VERSION} always reads $HOME/.pi/agent (permission-modes.json, model-profiles.json, settings.json) and cannot be redirected. Installing here would leave the permission gate reading a different configuration than Pi, so nothing was changed. Run the installer with the default agent directory (unset PI_AGENT_DIR and PI_CODING_AGENT_DIR)."
 }
 

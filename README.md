@@ -168,7 +168,10 @@ cannot be redirected. … nothing was changed.
 
 Set `HOME` (or the npm prefix) instead of `PI_CODING_AGENT_DIR`/`PI_AGENT_DIR`
 when you need the stack somewhere else. A symlink that resolves to
-`$HOME/.pi/agent` is the same directory and is accepted.
+`$HOME/.pi/agent` is the same directory and is accepted. A path containing `..`
+is refused outright, even when a lexical collapse would name the default
+directory: the kernel follows the symlink *before* applying a following `..`, so
+`$HOME/escape/../.pi/agent` writes into the link target, not into `$HOME/.pi`.
 
 With the supported layout, `/classifier-model` writes
 `$HOME/.pi/agent/permission-modes.json` — the file the gate reads — and only
@@ -206,7 +209,7 @@ Tests that cannot run report `SKIP`, never a false `PASS`. Real-runtime tests al
 | Suite | Covers |
 |---|---|
 | `scripts/tests/test-install-settings.sh` | stale-entry detection: string/object entries, npm→git, version bumps, unrelated packages, malformed settings, `pi remove` failure |
-| `scripts/tests/test-install-run.sh` | fresh install, repeat install, upgrade from 1.0.2, pre-install/pinned-source verification, tamper detection, rollback, custom agent directory refused before any mutation |
+| `scripts/tests/test-install-run.sh` | fresh install, repeat install, upgrade from 1.0.2, pre-install/pinned-source verification, tamper detection, rollback, custom agent directory refused before any mutation (including a `..` after a symlink, with the link target unchanged) |
 | `scripts/tests/test-install-lifecycle.mjs` | real Pi git install with and without `npm_config_ignore_scripts` |
 | `scripts/tests/test-classifier-config.mjs` | `/classifier-model` merge, disable, timeout, invalid JSON, atomic write, reload failure |
 | `scripts/tests/test-permission-gate.mjs` | fail-closed, bounded retries, allow/deny, embedded commands, powershell, outside-cwd |
@@ -216,7 +219,7 @@ Tests that cannot run report `SKIP`, never a false `PASS`. Real-runtime tests al
 | `scripts/tests/test-rollback.sh` | every failure shape: after backup/removal/install/verification/keybindings/tmux/last step, nested function in `$( )`, failing pipeline, failing subshell, `SIGINT`, `SIGTERM`, `SIGKILL` + recovery on the next run, `SIGKILL` at each CLI filesystem boundary, journal write/no-space/rename faults at every phase, offline recovery over damaged settings, created files removed, customised keybindings/tmux restored |
 | `scripts/tests/test-config-path.sh` | `/classifier-model` path: default HOME (also spelled with a trailing slash, relatively, or through a symlink), `PI_AGENT_DIR` ignored, and every custom `PI_CODING_AGENT_DIR` refused with the real `$HOME` config left byte-identical; persistence across reload |
 | `scripts/tests/test-config-source.mjs` | **real Pi 1.4.0 loader + pinned source**: which file the permission gate actually obeys. Contradictory rules in `$HOME/.pi/agent` and `PI_CODING_AGENT_DIR`; the decision must cite the former and ignore the latter (opt-in fixtures: `PI_BOOTSTRAP_PI_PACKAGE`, `PI_BOOTSTRAP_PM_280`) |
-| `scripts/tests/test-isolation-guards.mjs` | the suite refuses the real HOME (also through a symlink) and an agent dir outside it (also through a symlink); default-stack SKIPs a mismatched stack and never writes the given directory |
+| `scripts/tests/test-isolation-guards.mjs` | the suite refuses the real HOME (also through a symlink) and an agent dir outside it (also through a symlink), and refuses any `..` path instead of collapsing it — the write-through case is checked by the files a probe actually creates; default-stack SKIPs a mismatched stack and never writes the given directory |
 | `scripts/tests/test-version-matrix.mjs` | `install.sh` and `lib-pi.mjs` agree on every pin, and the embedded verifier matches its source |
 | `scripts/tests/test-real-upgrade.mjs` | **real CLI**: Pi 1.0.2 + 2.7.0/0.61.1/0.11.0 from npm, install.sh fails after installing 1.4.0/2.8.0, Pi 1.0.2 loads every restored package again, then a clean run verifies the pinned matrix (opt-in: `PI_BOOTSTRAP_REAL_UPGRADE=1`) |
 | `scripts/test-tmux.sh` | tmux `3.1`, `3.2`, `3.3a`, `3.4`, `3.5`, `3.5a`, `3.6`, downgrade, no-trailing-newline, reload failure |

@@ -272,4 +272,43 @@ assert_contains "$(cat "$root/link-dir.log")" "Installing Pi Coding Agent" \
 	"the run proceeded past preflight with the symlinked default directory"
 pass "custom agent directory: a symlink to \$HOME/.pi/agent is accepted as the default directory"
 
+# --- 11c. A ".." path that preflight must not mistake for the default ------
+# $HOME/escape is a symlink to <outside>/sub. The kernel follows that link and
+# only then applies "..", so writing $HOME/escape/../.pi/agent lands in
+# <outside>/.pi/agent. A lexical collapse (path.resolve) named $HOME/.pi/agent
+# instead, so preflight accepted the path and the installer wrote through the
+# link. The guarantee under test is about the filesystem, not the message: the
+# refusal must leave both the default directory and the link target untouched.
+escape_outside="$root/outside"
+mkdir -p "$escape_outside/sub" "$escape_outside/keep"
+printf '{"keep":true}\n' >"$escape_outside/keep/marker.json"
+ln -s "$escape_outside/sub" "$root/home/escape"
+printf '{"packages":[]}\n' >"$settings"
+# Full snapshots, not just the settings file: a refused run must not create a
+# state directory, a package tree, or anything else in either place. The default
+# agent directory already holds what case 11b installed, so it is compared to
+# itself rather than assumed empty.
+outside_before="$(cd "$escape_outside" && find . -mindepth 1 | LC_ALL=C sort)"
+agent_before="$(cd "$agent" && find . -mindepth 1 | LC_ALL=C sort)"
+home_before="$(cd "$root/home" && find . -mindepth 1 | LC_ALL=C sort)"
+: >"$FAKE_PI_LOG"
+if run_installer_with_agent "$root/home/escape/../.pi/agent" "$root/dotdot-dir.log"; then
+	fail_test "the installer accepted \$HOME/escape/../.pi/agent (a '..' after a symlink)"
+fi
+dotdot_log="$(cat "$root/dotdot-dir.log")"
+assert_contains "$dotdot_log" "UNSUPPORTED" "the '..' path is refused as unsupported"
+assert_contains "$dotdot_log" "Nothing was changed" "the refusal states that nothing was changed"
+assert_not_contains "$dotdot_log" "Fetching permission-modes source" "no network work happened first"
+assert_not_contains "$dotdot_log" "rolling back" "nothing was mutated, so nothing was rolled back"
+assert_eq "$outside_before" "$(cd "$escape_outside" && find . -mindepth 1 | LC_ALL=C sort)" \
+	"nothing was written through the escaping symlink"
+[[ ! -e "$escape_outside/.pi" ]] || fail_test "the refused run created \$HOME/escape/../.pi"
+[[ ! -e "$escape_outside/sub/.pi" ]] || fail_test "the refused run created a .pi directory in the link target"
+assert_eq "$agent_before" "$(cd "$agent" && find . -mindepth 1 | LC_ALL=C sort)" \
+	"the default agent directory is byte-for-byte the tree it was before the refused run"
+assert_eq "$home_before" "$(cd "$root/home" && find . -mindepth 1 | LC_ALL=C sort)" \
+	"the refused run created no directory inside HOME"
+assert_eq "0" "$(grep -c '^install ' "$FAKE_PI_LOG" || true)" "no package was installed"
+pass "custom agent directory: '..' after a symlink is refused; nothing written anywhere"
+
 echo "install-run tests passed"
