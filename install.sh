@@ -164,6 +164,30 @@ FAIL_REPORTED=0
 BACKUP_DIR="$STATE_DIR/backup"
 JOURNAL="$STATE_DIR/transaction.env"
 
+# ---------------------------------------------------------------------------
+# The journal is DATA, never code (R6).
+#
+# It used to be a file of `printf '%q'` shell assignments that recovery read
+# with `. "$JOURNAL"`. Sourcing executes the file, so a journal placed in an
+# agent directory that the installer is about to reject could run commands
+# before the directory check ever happened. The journal is now a versioned,
+# plain-data record:
+#
+#   pi-bootstrap-journal 1        <- fixed header, first line
+#   status=active                 <- <allowlisted key>=<percent-encoded value>
+#   ...
+#
+# Values are encoded with a fixed unreserved set; everything else is `%XX` of
+# one byte. The reader (`journal_read_v1`) is a strict parser: fixed keys, once
+# each, valid values, no control characters, nothing evaluated or expanded.
+# Journals written by older versions are read by `journal_read_legacy`, which
+# decodes `%q` backslash escapes character by character and refuses the `$'...'`
+# form outright, so no journal of any generation is ever executed.
+# ---------------------------------------------------------------------------
+JOURNAL_HEADER="pi-bootstrap-journal 1"
+JOURNAL_MAX_BYTES=4096
+JOURNAL_PHASES="backup activated-cli complete"
+
 journal_write() {
 	local status="$1" phase="$2"
 	local failure="could not record the transaction journal $JOURNAL"
@@ -175,18 +199,27 @@ journal_write() {
 		warn "$failure (write failed)"
 		return 1
 	fi
-	# Every path recovery needs is stored here as a shell assignment, so a
-	# recovery run never has to ask npm, git, or the network where the global
-	# Pi lives.
+	# Every path recovery needs is recorded here as plain data, so a recovery
+	# run never has to ask npm, git, or the network where the global Pi lives.
+	# The global locations are recorded as the two fixed tails of the npm prefix,
+	# which is what the reader accepts and what recovery derives its write
+	# targets from, so a journal this installer writes always validates.
+	local prefix="${GLOBAL_NPM_PREFIX:-}" package="" bin="" root=""
+	if [[ -n "$prefix" ]]; then
+		root="$prefix/lib/node_modules"
+		package="$root/@earendil-works/pi-coding-agent"
+		bin="$prefix/bin/pi"
+	fi
 	{
-		printf 'status=%q\n' "$status"
-		printf 'phase=%q\n' "$phase"
-		printf 'agent_dir=%q\n' "$AGENT_DIR"
-		printf 'GLOBAL_PI_PACKAGE=%q\n' "${GLOBAL_PI_PACKAGE:-}"
-		printf 'GLOBAL_PI_BIN=%q\n' "${GLOBAL_PI_BIN:-}"
-		printf 'GLOBAL_NPM_PREFIX=%q\n' "${GLOBAL_NPM_PREFIX:-}"
-		printf 'GLOBAL_NPM_ROOT=%q\n' "${GLOBAL_NPM_ROOT:-}"
-		printf 'pid=%q\n' "$$"
+		printf '%s\n' "$JOURNAL_HEADER"
+		printf 'status=%s\n' "$(journal_encode "$status")"
+		printf 'phase=%s\n' "$(journal_encode "$phase")"
+		printf 'agent_dir=%s\n' "$(journal_encode "$AGENT_DIR")"
+		printf 'global_pi_package=%s\n' "$(journal_encode "$package")"
+		printf 'global_pi_bin=%s\n' "$(journal_encode "$bin")"
+		printf 'global_npm_prefix=%s\n' "$(journal_encode "$prefix")"
+		printf 'global_npm_root=%s\n' "$(journal_encode "$root")"
+		printf 'pid=%s\n' "$(journal_encode "$$")"
 	} >"$JOURNAL.tmp" || {
 		warn "$failure (write failed)"
 		rm -f "$JOURNAL.tmp"
@@ -202,6 +235,587 @@ journal_write() {
 		rm -f "$JOURNAL.tmp"
 		return 1
 	}
+}
+
+# Encode one journal value. The alphabet is deliberately small: dots, slashes
+# and a few separators stay literal so a journal stays readable and diffable,
+# everything else becomes %XX of one byte. Encoding is not quoting, so no value
+# can ever be interpreted by the reader no matter what it contains.
+journal_encode() {
+	local value="$1" out="" char code i
+	local LC_ALL=C
+	for ((i = 0; i < ${#value}; i++)); do
+		char="${value:i:1}"
+		case "$char" in
+			[A-Za-z0-9._/:@+,-]) out+="$char" ;;
+			*)
+				printf -v code '%02X' "'$char"
+				out+="%${code}"
+				;;
+		esac
+	done
+	printf '%s' "$out"
+}
+
+# Decode a version-1 journal value: the exact inverse of journal_encode, or
+# failure. Only printable bytes are accepted, so a record cannot smuggle a
+# control character (NUL, CR, DEL, ESC, ...) into a path used for writes.
+journal_decode() {
+	local encoded="$1" out="" char code i
+	local LC_ALL=C
+	[[ "$encoded" =~ ^([A-Za-z0-9._/:@+,-]|%[0-9A-F][0-9A-F])*$ ]] || return 1
+	for ((i = 0; i < ${#encoded}; i++)); do
+		char="${encoded:i:1}"
+		if [[ "$char" != "%" ]]; then
+			out+="$char"
+			continue
+		fi
+		code="${encoded:i+1:2}"
+		((16#$code >= 32 && 16#$code != 127)) || return 1
+		out+="$(printf "\\x${code}")"
+		i=$((i + 2))
+	done
+	printf '%s' "$out"
+}
+
+# Decode the `printf '%q'` escaping used by journals written up to R6. This is a
+# pure decoder: it never expands, globs, or executes anything. `%q` output is one
+# of plain text, text with backslash-escaped characters, `''` for the empty
+# string, or the `$'...'` form for control characters. The last form is refused
+# outright - no legitimate journal value here (a status, a phase, a path, a pid)
+# needs it, and refusing keeps this parser small enough to reason about.
+journal_decode_q() {
+	local encoded="$1" out="" char i
+	local LC_ALL=C
+	local dollar_quote="\$'"
+	[[ "$encoded" != *"$dollar_quote"* ]] || return 1
+	if [[ "$encoded" == "''" ]]; then
+		printf '%s' ""
+		return 0
+	fi
+	for ((i = 0; i < ${#encoded}; i++)); do
+		char="${encoded:i:1}"
+		if [[ "$char" == "\\" ]]; then
+			i=$((i + 1))
+			((i < ${#encoded})) || return 1
+			out+="${encoded:i:1}"
+		else
+			out+="$char"
+		fi
+	done
+	case "$out" in
+		*[[:cntrl:]]*) return 1 ;;
+	esac
+	printf '%s' "$out"
+}
+
+# Fields a recovery run consumes, and the only keys a journal may carry.
+JOURNAL_KEYS_V1=" status phase agent_dir global_pi_package global_pi_bin global_npm_prefix global_npm_root pid "
+JOURNAL_KEYS_LEGACY=" status phase agent_dir GLOBAL_PI_PACKAGE GLOBAL_PI_BIN GLOBAL_NPM_PREFIX GLOBAL_NPM_ROOT pid global_package global_bin "
+JOURNAL_STATUS=""
+JOURNAL_PHASE=""
+JOURNAL_AGENT_DIR=""
+JOURNAL_GLOBAL_PI_PACKAGE=""
+JOURNAL_GLOBAL_PI_BIN=""
+JOURNAL_GLOBAL_NPM_PREFIX=""
+JOURNAL_GLOBAL_NPM_ROOT=""
+JOURNAL_ERROR=""
+
+journal_fields_reset() {
+	JOURNAL_STATUS=""
+	JOURNAL_PHASE=""
+	JOURNAL_AGENT_DIR=""
+	JOURNAL_GLOBAL_PI_PACKAGE=""
+	JOURNAL_GLOBAL_PI_BIN=""
+	JOURNAL_GLOBAL_NPM_PREFIX=""
+	JOURNAL_GLOBAL_NPM_ROOT=""
+	JOURNAL_ERROR=""
+}
+
+# Store one decoded field after checking its value. KEY is the canonical
+# (version-1) spelling.
+journal_store() {
+	local key="$1" value="$2"
+	case "$key" in
+		status)
+			[[ "$value" == "active" || "$value" == "committed" ]] || {
+				JOURNAL_ERROR="invalid status value"
+				return 1
+			}
+			JOURNAL_STATUS="$value"
+			;;
+		phase)
+			case " $JOURNAL_PHASES " in
+				*" $value "*) ;;
+				*)
+					JOURNAL_ERROR="invalid phase value"
+					return 1
+					;;
+			esac
+			JOURNAL_PHASE="$value"
+			;;
+		agent_dir)
+			JOURNAL_AGENT_DIR="$value"
+			;;
+		global_pi_package)
+			JOURNAL_GLOBAL_PI_PACKAGE="$value"
+			;;
+		global_pi_bin)
+			JOURNAL_GLOBAL_PI_BIN="$value"
+			;;
+		global_npm_prefix)
+			JOURNAL_GLOBAL_NPM_PREFIX="$value"
+			;;
+		global_npm_root)
+			JOURNAL_GLOBAL_NPM_ROOT="$value"
+			;;
+		pid)
+			# Recorded for diagnosis only; recovery never uses it, but it must
+			# still look like a pid.
+			[[ "$value" =~ ^[0-9]{1,10}$ ]] || {
+				JOURNAL_ERROR="invalid pid value"
+				return 1
+			}
+			;;
+		*)
+			JOURNAL_ERROR="unknown field"
+			return 1
+			;;
+	esac
+}
+
+# Read a version-1 journal. Strict by construction: fixed header, allowlisted
+# keys once each, canonical percent encoding, validated values. Nothing is
+# evaluated; the parsed fields are plain strings.
+journal_read_v1() {
+	local file="$1" line key encoded decoded seen=" " first=1 count=0
+	local LC_ALL=C
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		if ((first)); then
+			[[ "$line" == "$JOURNAL_HEADER" ]] || {
+				JOURNAL_ERROR="missing version header"
+				return 1
+			}
+			first=0
+			continue
+		fi
+		[[ -n "$line" ]] || {
+			JOURNAL_ERROR="blank record"
+			return 1
+		}
+		case "$line" in
+			*[[:cntrl:]]*)
+				JOURNAL_ERROR="control character in a record"
+				return 1
+				;;
+		esac
+		[[ "$line" == *=* ]] || {
+			JOURNAL_ERROR="record is not key=value"
+			return 1
+		}
+		key="${line%%=*}"
+		encoded="${line#*=}"
+		case "$JOURNAL_KEYS_V1" in
+			*" $key "*) ;;
+			*)
+				JOURNAL_ERROR="unknown field '${key}'"
+				return 1
+				;;
+		esac
+		case "$seen" in
+			*" $key "*)
+				JOURNAL_ERROR="duplicate field '${key}'"
+				return 1
+				;;
+		esac
+		seen+="$key "
+		decoded="$(journal_decode "$encoded")" || {
+			JOURNAL_ERROR="malformed encoding in '${key}'"
+			return 1
+		}
+		# A NUL byte in the file would be dropped by `read`; requiring the
+		# canonical encoding of the parsed value rules that out as well.
+		[[ "$(journal_encode "$decoded")" == "$encoded" ]] || {
+			JOURNAL_ERROR="non-canonical encoding in '${key}'"
+			return 1
+		}
+		journal_store "$key" "$decoded" || return 1
+		count=$((count + 1))
+	done <"$file"
+	((count == 8)) || {
+		JOURNAL_ERROR="expected 8 records, found ${count}"
+		return 1
+	}
+	return 0
+}
+
+# Read a journal written up to R6 (`printf '%q'` assignments). The same
+# allowlist applies; aliases from pre-R4 journals map onto the current fields.
+journal_read_legacy() {
+	local file="$1" line key raw field decoded seen=" " count=0
+	local LC_ALL=C
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		[[ -n "$line" ]] || {
+			JOURNAL_ERROR="blank record"
+			return 1
+		}
+		case "$line" in
+			*[[:cntrl:]]*)
+				JOURNAL_ERROR="control character in a record"
+				return 1
+				;;
+		esac
+		[[ "$line" == *=* ]] || {
+			JOURNAL_ERROR="record is not key=value"
+			return 1
+		}
+		key="${line%%=*}"
+		raw="${line#*=}"
+		case "$JOURNAL_KEYS_LEGACY" in
+			*" $key "*) ;;
+			*)
+				JOURNAL_ERROR="unknown field '${key}'"
+				return 1
+				;;
+		esac
+		case "$key" in
+			GLOBAL_PI_PACKAGE | global_package) field="global_pi_package" ;;
+			GLOBAL_PI_BIN | global_bin) field="global_pi_bin" ;;
+			GLOBAL_NPM_PREFIX) field="global_npm_prefix" ;;
+			GLOBAL_NPM_ROOT) field="global_npm_root" ;;
+			*) field="$key" ;;
+		esac
+		case "$seen" in
+			*" $field "*)
+				JOURNAL_ERROR="duplicate field '${key}'"
+				return 1
+				;;
+		esac
+		seen+="$field "
+		decoded="$(journal_decode_q "$raw")" || {
+			JOURNAL_ERROR="unsupported quoting in '${key}'"
+			return 1
+		}
+		journal_store "$field" "$decoded" || return 1
+		count=$((count + 1))
+	done <"$file"
+	[[ -n "$JOURNAL_STATUS" && -n "$JOURNAL_PHASE" && -n "$JOURNAL_AGENT_DIR" ]] || {
+		JOURNAL_ERROR="required field missing"
+		return 1
+	}
+	return 0
+}
+
+# True when VALUE is an absolute path a restore may touch: no ".." component,
+# no empty component, not the filesystem root.
+journal_usable_global_path() {
+	local value="$1"
+	[[ "$value" == /* ]] || return 1
+	[[ "$value" != "/" ]] || return 1
+	case "$value" in
+		*"//"* | */ | */../* | */..) return 1 ;;
+	esac
+	[[ "/$value/" != *"/../"* ]] || return 1
+	return 0
+}
+
+# True when the backup directory recorded work on the global Pi CLI, which is
+# the only thing that makes recovery write outside the agent directory.
+backup_records_cli_work() {
+	local marker
+	for marker in package.created package.existed bin.created bin.existed; do
+		[[ -f "$BACKUP_DIR/cli/$marker" ]] && return 0
+	done
+	return 1
+}
+
+GLOBAL_PATH_ERROR=""
+GLOBAL_EFFECTIVE_PREFIX=""
+# Validate the global-npm locations a journal records and derive the ONE prefix
+# recovery is allowed to act below. The journal is not trusted to name arbitrary
+# locations: its package, bin and root must be exactly the fixed Pi-shaped tails
+# of its prefix, so recovery can only ever write
+# `<prefix>/bin/pi` and
+# `<prefix>/lib/node_modules/@earendil-works/pi-coding-agent`. A journal from a
+# pre-R4 release carries only the package and bin; the prefix is derived from
+# them and then validated the same way.
+validate_global_paths() {
+	local package="$1" bin="$2" prefix="$3" root="$4" value
+	GLOBAL_PATH_ERROR=""
+	GLOBAL_EFFECTIVE_PREFIX=""
+	for value in "$package" "$bin" "$prefix" "$root"; do
+		[[ -n "$value" ]] || continue
+		journal_usable_global_path "$value" || {
+			GLOBAL_PATH_ERROR="'${value}' is not an absolute path without '..'"
+			return 1
+		}
+	done
+	if [[ -z "$prefix" ]]; then
+		if [[ -n "$bin" && "$bin" == */bin/pi ]]; then
+			prefix="${bin%/bin/pi}"
+		elif [[ -n "$package" && "$package" == */lib/node_modules/@earendil-works/pi-coding-agent ]]; then
+			prefix="${package%/lib/node_modules/@earendil-works/pi-coding-agent}"
+		fi
+	fi
+	if [[ -z "$prefix" ]]; then
+		if [[ -n "$package" || -n "$bin" || -n "$root" ]] || backup_records_cli_work; then
+			GLOBAL_PATH_ERROR="the backup records work on the global Pi CLI, but the journal records no npm prefix to anchor it on this machine"
+			return 1
+		fi
+		# Nothing global will be written; the agent directory is all recovery
+		# touches.
+		return 0
+	fi
+	[[ -z "$package" || "$package" == "$prefix/lib/node_modules/@earendil-works/pi-coding-agent" ]] || {
+		GLOBAL_PATH_ERROR="the recorded package ${package} is not <prefix>/lib/node_modules/@earendil-works/pi-coding-agent"
+		return 1
+	}
+	[[ -z "$bin" || "$bin" == "$prefix/bin/pi" ]] || {
+		GLOBAL_PATH_ERROR="the recorded pi bin ${bin} is not <prefix>/bin/pi"
+		return 1
+	}
+	[[ -z "$root" || "$root" == "$prefix/lib/node_modules" ]] || {
+		GLOBAL_PATH_ERROR="the recorded npm root ${root} is not <prefix>/lib/node_modules"
+		return 1
+	}
+	validate_global_prefix_binding "$prefix" || return 1
+	GLOBAL_EFFECTIVE_PREFIX="$prefix"
+	return 0
+}
+
+# The prefix must also be anchored to THIS machine, because the journal is the
+# only offline record of where the global Pi lives and recovery must not be
+# redirectable. Three local anchors are accepted; none needs npm, the network, a
+# settings file, or a working `pi`:
+#
+#   * an explicitly configured npm global prefix (npm_config_prefix) must equal
+#     the recorded one exactly;
+#   * `command -v pi` must resolve to `<prefix>/bin/pi` - the same physical
+#     directory and the same file name;
+#   * the prefix must already carry the Pi-shaped entry the interrupted run
+#     itself creates: `<prefix>/bin/pi` (possibly a DANGLING link, which is
+#     exactly the state left by a crash between moving the package aside and
+#     activating the new one) or
+#     `<prefix>/lib/node_modules/@earendil-works/pi-coding-agent`.
+#
+# A prefix below which some other executable happens to sit is not an anchor: a
+# crafted `/usr` would otherwise match `/usr/local/bin/pi` and give recovery
+# `/usr/bin/pi` and `/usr/lib/node_modules` as write targets. The third anchor
+# cannot be forged for a prefix the journal author cannot write to, because it
+# is a filesystem object inside that prefix. With no anchor at all, recovery
+# still proceeds when there is nothing global to restore and refuses when there
+# is: an unprovable location is never written to.
+validate_global_prefix_binding() {
+	local prefix="$1" configured="${npm_config_prefix:-}" pi_path pi_physical prefix_physical
+	[[ -n "$prefix" ]] || return 0
+	if [[ -n "$configured" ]]; then
+		configured="${configured%/}"
+		[[ "$prefix" == "$configured" ]] || {
+			GLOBAL_PATH_ERROR="the recorded npm prefix ${prefix} is not the npm prefix configured for this environment (${configured})"
+			return 1
+		}
+		return 0
+	fi
+	pi_path="$(command -v pi 2>/dev/null || true)"
+	if [[ "$pi_path" == /* ]]; then
+		# Compare the directory physically (npm's bin entry is usually a symlink
+		# into the package, so the file itself is not the anchor) and the name
+		# literally: the anchor is "this prefix's bin/pi", nothing wider.
+		pi_physical="$(physical_dir_path "$(dirname "$pi_path")")" || pi_physical=""
+		prefix_physical="$(physical_dir_path "$prefix/bin")" || prefix_physical=""
+		if [[ -n "$pi_physical" && -n "$prefix_physical" && "$pi_physical" == "$prefix_physical" && "${pi_path##*/}" == "pi" ]]; then
+			return 0
+		fi
+	fi
+	if [[ -e "$prefix/bin/pi" || -L "$prefix/bin/pi" || -d "$prefix/lib/node_modules/@earendil-works/pi-coding-agent" ]]; then
+		return 0
+	fi
+	if backup_records_cli_work; then
+		GLOBAL_PATH_ERROR="the recorded npm prefix ${prefix} cannot be confirmed on this machine (no matching npm_config_prefix, no ${prefix}/bin/pi on PATH, and no Pi entry inside it), so the global Pi will not be touched"
+		return 1
+	fi
+	return 0
+}
+
+# Cross-check the record against this run: it must describe THIS agent
+# directory (a journal found in A must never drive a recovery in B), and its
+# global paths must be anchored on this machine.
+journal_validate() {
+	local journal_physical current_physical
+	[[ -n "$JOURNAL_AGENT_DIR" ]] || {
+		JOURNAL_ERROR="the journal records no agent directory"
+		return 1
+	}
+	# The recorded directory is never written to - recovery writes only to the
+	# agent directory this run admitted - so it is used for one purpose: proving
+	# that this journal belongs to this directory. A value that does not resolve
+	# (relative, dangling, cyclic, or containing "..") fails closed.
+	journal_physical="$(physical_dir_path "$JOURNAL_AGENT_DIR")" || {
+		JOURNAL_ERROR="the recorded agent directory does not resolve"
+		return 1
+	}
+	current_physical="$(physical_dir_path "$AGENT_DIR")" || {
+		JOURNAL_ERROR="the current agent directory does not resolve"
+		return 1
+	}
+	[[ "$journal_physical" == "$current_physical" ]] || {
+		JOURNAL_ERROR="the journal describes ${JOURNAL_AGENT_DIR}, not ${AGENT_DIR}"
+		return 1
+	}
+	validate_global_paths "$JOURNAL_GLOBAL_PI_PACKAGE" "$JOURNAL_GLOBAL_PI_BIN" \
+		"$JOURNAL_GLOBAL_NPM_PREFIX" "$JOURNAL_GLOBAL_NPM_ROOT" || {
+		JOURNAL_ERROR="$GLOBAL_PATH_ERROR"
+		return 1
+	}
+	return 0
+}
+
+# Read and validate the journal into the JOURNAL_* fields. Never executes the
+# file: no `source`, no `eval`, and no shell word expansion of any field.
+journal_read() {
+	local file="$1" size without_nuls
+	journal_fields_reset
+	[[ -e "$file" || -L "$file" ]] || {
+		JOURNAL_ERROR="the journal does not exist"
+		return 1
+	}
+	if [[ -L "$file" ]]; then
+		JOURNAL_ERROR="the journal is a symlink"
+		return 1
+	fi
+	[[ -f "$file" ]] || {
+		JOURNAL_ERROR="the journal is not a regular file"
+		return 1
+	}
+	size="$(wc -c <"$file" | tr -d ' ')"
+	[[ "$size" =~ ^[0-9]+$ ]] || {
+		JOURNAL_ERROR="could not measure the journal"
+		return 1
+	}
+	((size <= JOURNAL_MAX_BYTES)) || {
+		JOURNAL_ERROR="the journal is larger than ${JOURNAL_MAX_BYTES} bytes"
+		return 1
+	}
+	without_nuls="$(tr -d '\000' <"$file" | wc -c | tr -d ' ')"
+	[[ "$without_nuls" == "$size" ]] || {
+		JOURNAL_ERROR="the journal contains NUL bytes"
+		return 1
+	}
+	if [[ "$(head -n 1 "$file")" == "$JOURNAL_HEADER" ]]; then
+		journal_read_v1 "$file" || return 1
+	else
+		journal_read_legacy "$file" || return 1
+	fi
+	journal_validate || return 1
+	return 0
+}
+
+# Refuse to act on a journal that cannot be trusted. Fail closed: nothing is
+# restored, nothing is deleted, and the journal and its backups stay exactly
+# where they are, with instructions. This is the only outcome for a journal this
+# installer cannot prove it wrote.
+journal_refuse() {
+	local reason="$1"
+	echo "pi-bootstrap: error: $reason" >&2
+	echo "pi-bootstrap: nothing was changed and nothing was deleted. The evidence was kept:" >&2
+	echo "pi-bootstrap:   journal: $JOURNAL" >&2
+	if [[ -d "$BACKUP_DIR" ]]; then
+		echo "pi-bootstrap:   backups: $BACKUP_DIR" >&2
+	else
+		echo "pi-bootstrap:   backups: $BACKUP_DIR (missing)" >&2
+	fi
+	echo "pi-bootstrap: recovery needs a journal this installer wrote, in the supported agent directory ($HOME/.pi/agent)." >&2
+	echo "pi-bootstrap: inspect the journal and $BACKUP_DIR; once you have decided the environment is safe, either restore" >&2
+	echo "pi-bootstrap: by hand or move the journal and $BACKUP_DIR aside and re-run install.sh." >&2
+	echo "pi-bootstrap: the installer will not continue a normal installation while this transaction is unresolved." >&2
+	FAIL_REPORTED=1
+	exit 1
+}
+
+# The only files a backup manifest may name. Every path the installer replaces
+# or creates under its own control is listed here; the tmux config is added from
+# this run's configuration because it is user-selectable, plus the default
+# $HOME/.tmux.conf so a recovery run does not depend on TMUX_CONFIG_FILE being
+# spelled the same way it was when the journal was written.
+restore_target_allowed() {
+	local candidate="$1"
+	case "$candidate" in
+		"$EXTENSIONS_DIR/classifier-model.ts" | "$EXTENSIONS_DIR/minimal-mode.ts" | "$KEYBINDINGS_FILE" | "$SETTINGS_FILE" | "$TMUX_CONFIG" | "$HOME/.tmux.conf")
+			return 0
+			;;
+	esac
+	return 1
+}
+
+RESTORE_ERROR=""
+# Check both manifests completely BEFORE the first destructive step. A manifest
+# entry that is not a known managed path (or a stored blob name that is not a
+# plain file name inside the backup) stops the recovery with the manifests
+# untouched, so a crafted entry can never redirect a restore write or an
+# `rm` outside the managed roots.
+validate_backup_manifests() {
+	local original stored created count=0
+	RESTORE_ERROR=""
+	[[ -d "$BACKUP_DIR" ]] || {
+		RESTORE_ERROR="the backup directory $BACKUP_DIR is missing"
+		return 1
+	}
+	if [[ -e "$BACKUP_DIR/files.tsv" ]]; then
+		[[ -f "$BACKUP_DIR/files.tsv" ]] || {
+			RESTORE_ERROR="$BACKUP_DIR/files.tsv is not a regular file"
+			return 1
+		}
+		while IFS=$'\t' read -r original stored || [[ -n "$original" ]]; do
+			[[ -n "$original" || -n "$stored" ]] || continue
+			restore_target_allowed "$original" || {
+				RESTORE_ERROR="files.tsv names ${original}, which is not a path this installer manages"
+				return 1
+			}
+			[[ "$stored" =~ ^[0-9]{3}-[A-Za-z0-9._-]+$ && "$stored" != */* ]] || {
+				RESTORE_ERROR="files.tsv names the backup blob '${stored}', which is not a plain file name"
+				return 1
+			}
+			count=$((count + 1))
+			((count <= 64)) || {
+				RESTORE_ERROR="files.tsv has more entries than this installer can create"
+				return 1
+			}
+		done <"$BACKUP_DIR/files.tsv"
+	fi
+	if [[ -e "$BACKUP_DIR/created.list" ]]; then
+		[[ -f "$BACKUP_DIR/created.list" ]] || {
+			RESTORE_ERROR="$BACKUP_DIR/created.list is not a regular file"
+			return 1
+		}
+		count=0
+		while IFS= read -r created || [[ -n "$created" ]]; do
+			[[ -n "$created" ]] || continue
+			case "$created" in
+				"$AGENT_DIR/npm" | "$AGENT_DIR/git") ;;
+				*)
+					restore_target_allowed "$created" || {
+						RESTORE_ERROR="created.list names ${created}, which is not a path this installer manages"
+						return 1
+					}
+					;;
+			esac
+			count=$((count + 1))
+			((count <= 64)) || {
+				RESTORE_ERROR="created.list has more entries than this installer can create"
+				return 1
+			}
+		done <"$BACKUP_DIR/created.list"
+	fi
+	# The CLI backup markers are plain flag files; a directory or link where a
+	# flag belongs is not something this installer writes and is refused.
+	for marker in cli/package.created cli/package.existed cli/bin.created cli/bin.existed cli/bin-file cli/bin-target; do
+		[[ -e "$BACKUP_DIR/$marker" || -L "$BACKUP_DIR/$marker" ]] || continue
+		[[ -f "$BACKUP_DIR/$marker" && ! -L "$BACKUP_DIR/$marker" ]] || {
+			RESTORE_ERROR="$BACKUP_DIR/$marker is not a regular file"
+			return 1
+		}
+	done
+	return 0
 }
 
 # Test-only fault injection for the journal, exercised by
@@ -1390,9 +2004,16 @@ verify_restored_environment() {
 
 # Restore everything the journal and backup directory describe. Idempotent:
 # every step checks what is actually present, so it is safe after a partial
-# crash as well as after a trap.
+# crash as well as after a trap. Both manifests are validated before the first
+# destructive step; an invalid manifest returns non-zero and changes nothing.
 restore_from_backup() {
 	local original stored created old_target
+
+	validate_backup_manifests || {
+		echo "pi-bootstrap: error: refusing to restore from $BACKUP_DIR: ${RESTORE_ERROR}" >&2
+		echo "pi-bootstrap: nothing in the backup directory was used, changed or removed." >&2
+		return 1
+	}
 
 	global_cli_paths
 
@@ -1498,7 +2119,12 @@ recover() {
 	MUTATION_STARTED=0
 	set +e
 	echo "pi-bootstrap: rolling back to the previous state..." >&2
-	restore_from_backup
+	if ! restore_from_backup; then
+		echo "pi-bootstrap: rollback could not use the backups safely (${RESTORE_ERROR}). Nothing was removed." >&2
+		echo "pi-bootstrap: backups are kept at $BACKUP_DIR; the next installer run will refuse to start until they are resolved." >&2
+		echo "pi-bootstrap: fix the reported problem and re-run install.sh." >&2
+		return 0
+	fi
 
 	# 0 = restored and proven to load, 3 = restored but unprovable (no real
 	# loader / stub pi), anything else = restored but verification failed.
@@ -1523,24 +2149,47 @@ recover() {
 }
 
 # Recover from a run that was killed without running any trap (SIGKILL, power
-# loss). Runs before anything in a new install touches the filesystem.
+# loss). Runs before anything in a new install touches the filesystem, but only
+# after the agent directory has been admitted (see main): a journal is DATA read
+# from that directory, so the directory must be the supported one before a byte
+# of it is interpreted. Nothing in the journal is executed.
 recover_interrupted_run() {
-	local status=""
-	[[ -f "$JOURNAL" ]] || return 0
-	status="$(sed -n 's/^status=//p' "$JOURNAL" | head -n 1)"
-	# shellcheck disable=SC1090
-	. "$JOURNAL" 2>/dev/null || true
-	# Journals written before R4 stored the global paths under lowercase names.
-	GLOBAL_PI_PACKAGE="${GLOBAL_PI_PACKAGE:-${global_package:-}}"
-	GLOBAL_PI_BIN="${GLOBAL_PI_BIN:-${global_bin:-}}"
-	if [[ "$status" == "committed" ]]; then
+	# Defense in depth: the same side-effect-free admission check main() has
+	# already run. It reads no journal.
+	require_supported_agent_dir
+	# `-L` as well: a symlink is not a journal this installer wrote, and the
+	# reader refuses it below rather than following it somewhere else.
+	[[ -e "$JOURNAL" || -L "$JOURNAL" ]] || return 0
+	if ! journal_read "$JOURNAL"; then
+		journal_refuse "the transaction journal $JOURNAL could not be read safely: ${JOURNAL_ERROR}."
+	fi
+	# The restore targets are DERIVED from the validated prefix, never taken
+	# verbatim from the journal: whatever the file said, the only global paths
+	# recovery can write are these two fixed Pi-shaped tails below it.
+	if [[ -n "$GLOBAL_EFFECTIVE_PREFIX" ]]; then
+		GLOBAL_NPM_PREFIX="$GLOBAL_EFFECTIVE_PREFIX"
+		GLOBAL_NPM_ROOT="$GLOBAL_NPM_PREFIX/lib/node_modules"
+		GLOBAL_PI_PACKAGE="$GLOBAL_NPM_ROOT/@earendil-works/pi-coding-agent"
+		GLOBAL_PI_BIN="$GLOBAL_NPM_PREFIX/bin/pi"
+	else
+		GLOBAL_NPM_PREFIX=""
+		GLOBAL_NPM_ROOT=""
+		GLOBAL_PI_PACKAGE=""
+		GLOBAL_PI_BIN=""
+	fi
+	if [[ "$JOURNAL_STATUS" == "committed" ]]; then
 		echo "pi-bootstrap: cleaning up a previous run that committed but did not finish"
 		discard_backup
 		return 0
 	fi
-	echo "pi-bootstrap: a previous run was interrupted during '${phase:-unknown}' and left backups in $BACKUP_DIR" >&2
+	# An interrupted run always has a backup directory; a journal without one
+	# describes a restore nothing could perform, so it is not acted on.
+	if [[ ! -d "$BACKUP_DIR" ]]; then
+		journal_refuse "the journal records an interrupted run, but its backup directory $BACKUP_DIR is missing."
+	fi
+	echo "pi-bootstrap: a previous run was interrupted during '${JOURNAL_PHASE}' and left backups in $BACKUP_DIR" >&2
 	echo "pi-bootstrap: rolling back to the previous state before continuing..." >&2
-	restore_from_backup
+	restore_from_backup || journal_refuse "the recorded restore could not be completed."
 	# Verify through the npm global launcher that was just restored, not through
 	# whatever `pi` happens to be first on PATH. Verification is a local Node
 	# load of the restored files; it is not a prerequisite for restoring them,
@@ -2061,6 +2710,16 @@ main() {
 	# work, so an unreachable network or a corrupt settings file cannot keep a
 	# crashed upgrade from being rolled back. The verifier is embedded in this
 	# script, so materialising it needs no network either.
+	#
+	# R6: admitting the agent directory comes first and is side-effect free. The
+	# journal lives inside AGENT_DIR; while it was read with `source`, an
+	# unsupported directory could run arbitrary code through it before the
+	# directory was ever checked. The admission check needs no network, no npm
+	# and no settings.json, so recovery for the supported directory is still
+	# local-first and a journal can never be interpreted before that directory
+	# is proven to be the supported one.
+	[[ -n "${HOME:-}" ]] || fail "HOME is not set"
+	require_supported_agent_dir
 	materialize_verify_stack
 	recover_interrupted_run
 	if [[ "${PI_BOOTSTRAP_RECOVER_ONLY:-0}" == 1 ]]; then
