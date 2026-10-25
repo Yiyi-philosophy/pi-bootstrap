@@ -23,7 +23,7 @@ Third-party Pi extensions run with the user's permissions. Read the source and i
 
 ## Version policy
 
-This repository reproduces one pinned ecosystem snapshot; it does not install whatever happens to be latest. Exact versions are kept in `install.sh` so the one-line installer remains self-contained. A newer upstream release is adopted only after the complete Pi plus extension combination passes compatibility checks. See [`TESTED_VERSIONS.md`](TESTED_VERSIONS.md) for the verification record and the distinction between published, metadata-compatible, and runtime-tested releases.
+This repository reproduces one pinned ecosystem snapshot; it does not install whatever happens to be latest. Exact versions and the source manifest are maintained in `scripts/pins.mjs` and embedded into the self-contained `install.sh` by `node scripts/build-installer.mjs`. A newer upstream release is adopted only after the complete Pi plus extension combination passes compatibility checks. See [`TESTED_VERSIONS.md`](TESTED_VERSIONS.md) for the verification record and the distinction between published, metadata-compatible, and runtime-tested releases.
 
 The stable Pi release is the anchor. `minimal-mode.ts` is always downloaded from the matching `earendil-works/pi` release tag, never from `main`, and its SHA256 is verified. Default and optional extensions are checked against that Pi release before their pins are changed. When a component is pinned to a git commit instead of an npm release, the commit is immutable, never a moving branch, and every installed file is verified against an embedded SHA256 manifest; source-built pins are always labeled as such and never presented as official npm releases.
 
@@ -39,7 +39,7 @@ See [`TESTED_VERSIONS.md`](TESTED_VERSIONS.md) for the full list. In short: perm
 - `permission-modes` 2.8.0 from the pinned upstream commit `cf77816f28e102409dddbf8e537e4cf57aa092f0`
 - The local [`extensions/classifier-model.ts`](extensions/classifier-model.ts), which adds `/classifier-model`
 
-`permission-modes@2.8.0` is **not an npm release** (npm still ships 2.7.0, which has a classifier bug that ignores authentication-resolved custom `baseUrl`). The installer pins the upstream commit and verifies all 69 files against a SHA256 manifest embedded in `install.sh`, so the install is reproducible without depending on a registry publication.
+`permission-modes@2.8.0` is **not an npm release** (npm still ships 2.7.0, which has a classifier bug that ignores authentication-resolved custom `baseUrl`). The installer verifies the commit, immutable tree `480649739171c272f355850cf6b6228ffa823c0c`, exact tracked file set and all 69 SHA256 hashes before publishing the source into Pi’s managed git directory. It does not run the source checkout’s npm lifecycle.
 
 ### Default convenience extensions
 
@@ -81,7 +81,7 @@ The installer checks `tmux -V` numerically and never kills the tmux server:
 - tmux **3.2 through 3.4**: `set -g extended-keys on`
 - tmux **older than 3.2**: no extended-key configuration; upgrade tmux or run Pi outside tmux for modified Enter shortcuts
 
-Settings are maintained in a small idempotent block in `~/.tmux.conf`. If the installer is running inside tmux it attempts `tmux source-file`; a full server restart may still be needed for modified-key changes to be guaranteed active.
+Settings are maintained in a small idempotent block in `~/.tmux.conf`. The installer does not contact a running tmux server. After reviewing the file, reload it yourself; a server restart may be needed for modified-key changes.
 
 ## Optional extensions
 
@@ -102,7 +102,23 @@ pi install npm:@narumitw/pi-lsp@<TESTED_VERSION>
 
 ## Files and safety
 
-The installer is idempotent. It creates `~/.pi/agent/extensions/` as needed, atomically merges JSON objects, keeps unrelated fields, and refuses to replace malformed JSON. It never edits `auth.json` or `models.json`, changes shell profiles, installs sudo packages, enables bypass mode, or installs optional extensions.
+The installer uses one transaction for the global CLI/bin, managed npm/git trees, local extensions, settings, keybindings and tmux file. Before any replacement it copies and fsyncs the complete snapshots, fsyncs a checksummed manifest, then atomically writes and fsyncs a versioned JSON journal. `transaction.env` retains its legacy filename but contains **data only**; no shell parser or evaluator reads it. Canonical JSON, fixed keys, bounds, types, relative inventories, hashes and physical paths are validated before restoring or deleting anything.
+
+Only the default `$HOME/.pi/agent` is supported. A `PI_CODING_AGENT_DIR` or legacy `PI_AGENT_DIR` override is accepted only when component-by-component physical resolution proves it names that exact default directory. Custom locations, redirected default/state/backup parents, dangling links and missing-component-plus-`..` paths fail before journal access or network/mutation. Permission-modes independently uses `homedir()/.pi/agent`; the installer never mirrors its configuration into another HOME.
+
+The npm global prefix is independently anchored to `npm_config_prefix` / `NPM_CONFIG_PREFIX` (which must agree), or the running Node installation prefix. The actual `npm prefix -g` and `npm root -g` must agree before installation. Set both prefix environment variables explicitly if your npm configuration uses another prefix. A non-default `settings.npmCommand` is unsupported. npm lifecycle scripts are disabled for global and extension installs; real Pi lifecycle tests include an executing positive control. No sudo, shell profile changes or optional packages are involved.
+
+Package migration matches exact npm identities and the exact permission-modes GitHub repository. String and object entries (including `autoload` and resource filters) are preserved; duplicate identities, duplicate JSON keys, malformed objects and ambiguous specifications stop the installation. Every `pi remove` failure aborts and rolls back. Unrelated settings and package entries are retained. The installer does not write `auth.json`, `models.json`, `permission-modes.json` or `advisor.json`.
+
+On ordinary errors, SIGINT or SIGTERM it restores snapshots and verifies the old CLI version and extension commands with the real old loader. A gated child process records its worker PID durably before running and kills its process group on installer death. SIGKILL/power loss recovery happens on the next invocation, before parsing live settings or calling npm/curl/git:
+
+```bash
+./install.sh --recover
+```
+
+Use the same HOME and prefix environment as the interrupted invocation. Recovery does not resume installation automatically. A missing previous CLI is reported as `UNVERIFIED`. Validation failures retain the journal and backup and stop installation. Successful installs also retain their prior backup; an unchanged repeat checks the real loader and performs no package installation. Valid committed/rolled-back evidence is validated before a later transaction replaces it.
+
+Recovery is retryable if restoration itself is killed; the live tree can be partial until the next successful recovery. A truncated temporary journal is never interpreted and is retained as `journal-fragment`; review it before a new installation. A crash during committed-backup cleanup, unsupported legacy shell journals, changed prefix, unsafe ownership/modes or conflicting evidence requires manual review. Do not delete evidence to force installation. Run the installer with Pi sessions stopped: the lock coordinates bootstrap invocations, not arbitrary concurrent processes or a hostile process with the same UID. fsync durability depends on filesystem/OS guarantees.
 
 The local extension writes only this file when the user selects a classifier:
 
@@ -128,12 +144,14 @@ The classifier extension uses Pi's current APIs for the pinned release: `pi.regi
 
 ## Testing
 
+Tests create fresh scratch homes and explicitly set both npm prefixes, caches, user/global npmrc paths, TMPDIR, Pi directory, tmux file and PATH. Before every real global operation they check npm’s actual prefix/root. Never run acceptance against a production HOME.
+
 ```bash
+node scripts/build-installer.mjs --check
 bash -n install.sh
-shellcheck install.sh  # optional
-git diff --check
-scripts/check-embedded-extension.sh
-scripts/test-tmux.sh
+shellcheck install.sh scripts/*.sh
+node --test scripts/test-offline.mjs
+node scripts/test-real.mjs /absolute/scratch/evidence-directory
 ```
 
-The monthly maintenance prompt also specifies isolated tests for malformed JSON, config merging, installer idempotence, upgrade-path transitions, pinned URLs and checksums, the permission-modes SHA256 manifest, and tmux versions `3.1`, `3.2`, `3.3a`, `3.4`, `3.5`, `3.5a`, and `3.6`.
+The final real suite installs the exact matrix in a fresh home, checks repeat-run filesystem identity, proves npm lifecycle suppression, upgrades an actual Pi 1.0.2 stack, injects failure after CLI replacement, compares restored inventories and old loader commands, exercises offline recovery with broken settings, then tests migration and the local HTTP classifier/gates. It performs no real provider requests. The tmux release branches are stubbed transformations; terminal key forwarding is not certified. See [`docs/independent-hardening-report.md`](docs/independent-hardening-report.md) for the independent verification record and remaining limits.
