@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { context, physical, Transaction, inventory, settingsPlan, packageIdentity, tmuxText, rejectDuplicateKeys, encode } from './bootstrap.mjs';
 import { scratch, command } from './test-support.mjs';
 import { PINS } from './pins.mjs';
+import './test-fixture-isolation.mjs';
 
 const sha = x => createHash('sha256').update(x).digest('hex');
 const put = (file, data) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, data, { mode: 0o600 }); };

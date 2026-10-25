@@ -3,8 +3,11 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { context, Transaction } from './bootstrap.mjs';
+import { verifyScratchEnvironment } from './test-support.mjs';
+// This guard is inside every fixture entrypoint, before context/journal/CLI
+// access. Probe stays offline; mutating actions also verify effective npm paths.
+verifyScratchEnvironment(process.env, { npm: process.argv[2] !== 'probe' });
 const c = context();
-assert.ok(c.home.startsWith(path.dirname(process.env.TMPDIR) + '/'));
 if (process.argv[2] === 'fail-upgrade') {
   const tx = new Transaction(c, { checkpoint: phase => { if (phase === 'after:cli') throw Error('acceptance: failed upgrade after real CLI replacement'); } });
   try { await tx.install(fs.readFileSync(new URL('../extensions/classifier-model.ts', import.meta.url), 'utf8')); }

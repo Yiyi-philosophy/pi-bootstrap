@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { context, inventory, Transaction } from './bootstrap.mjs';
 import { PINS } from './pins.mjs';
 import { scratch, verifyScratch, command } from './test-support.mjs';
+import { probeAcceptance } from './test-probe.mjs';
 const repo = new URL('../', import.meta.url).pathname;
 const report = { started: new Date().toISOString(), gates: [], scratch: [] };
 const evidence = process.argv[2] || scratch('evidence').root;
@@ -43,6 +44,8 @@ try {
   const initial = snapshot(c), stateBefore = inventory(c.state);
   installer(clean); assert.deepEqual(snapshot(c), initial); assert.deepEqual(inventory(c.state), stateBefore);
   pass('repeat installer has byte-identical managed trees and retained evidence');
+  probeAcceptance(clean);
+  pass('probe honors disabled/filter/autoload resources, excludes auto-discovered mjs and verifies enabled old commands');
 
   const source = path.join(clean.root, 'lifecycle-source'); fs.mkdirSync(source);
   put(path.join(source, 'package.json'), JSON.stringify({ name: 'scratch-lifecycle', version: '1.0.0', scripts: { postinstall: 'node marker.cjs', prepare: 'node marker.cjs' } }));

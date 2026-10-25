@@ -480,22 +480,16 @@ export class Transaction {
       import fs from 'node:fs'; import path from 'node:path'; import {pathToFileURL} from 'node:url';
       const [cli,agent] = process.argv.slice(1);
       const {loadExtensions} = await import(pathToFileURL(path.join(cli,'dist/core/extensions/loader.js')));
+      const {DefaultPackageManager} = await import(pathToFileURL(path.join(cli,'dist/core/package-manager.js')));
+      const {SettingsManager} = await import(pathToFileURL(path.join(cli,'dist/core/settings-manager.js')));
       const config=fs.existsSync(path.join(agent,'settings.json'))?JSON.parse(fs.readFileSync(path.join(agent,'settings.json'),'utf8')):{};
-      const paths=[];
-      for(const e of config.packages||[]) {
-        const s=typeof e==='string'?e:e.source;
-        if(s.startsWith('npm:')) {
-          const name=s.slice(4).replace(/@[^@/]+$/,'');
-          const root=path.join(agent,'npm/node_modules',name), p=path.join(root,'package.json');
-          if(fs.existsSync(p)) for(const f of JSON.parse(fs.readFileSync(p)).pi?.extensions||[]) paths.push(path.join(root,f));
-        } else if(s.startsWith('git:github.com/')) {
-          const root=path.join(agent,'git/github.com',s.slice(15).split('@')[0]);
-          const p=path.join(root,'package.json');
-          if(fs.existsSync(p)) for(const f of JSON.parse(fs.readFileSync(p)).pi?.extensions||[]) paths.push(path.join(root,f));
-        }
-      }
-      const ext=path.join(agent,'extensions');
-      if(fs.existsSync(ext)) for(const f of fs.readdirSync(ext)) if(/\\.(ts|js|mjs)$/.test(f)) paths.push(path.join(ext,f));
+      // Use this installed Pi's enabled-resource semantics, including package
+      // filters, autoload deltas, user overrides and .ts/.js auto-discovery.
+      // No project resources, builtins, installs or settings writes in a probe.
+      const settingsManager=SettingsManager.inMemory(config,{projectTrusted:false});
+      const manager=new DefaultPackageManager({cwd:agent,agentDir:agent,settingsManager});
+      const resources=await manager.resolve(()=>"skip");
+      const paths=resources.extensions.filter(r=>r.enabled && !r.path.startsWith('builtin:')).map(r=>r.path);
       const result=await loadExtensions(paths,agent);
       if(result.errors.length) throw Error(JSON.stringify(result.errors));
       console.log(JSON.stringify([...new Set(result.extensions.flatMap(e=>[...e.commands.keys()]))].sort()));

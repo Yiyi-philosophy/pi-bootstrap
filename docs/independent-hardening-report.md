@@ -157,9 +157,9 @@ criterion or version pin was weakened.
 - Durability depends on OS/filesystem fsync semantics. Cleanup interrupted by
   power loss or conflicting/truncated retained evidence may require manual
   review. Recovery deliberately refuses ambiguity rather than deleting it.
-- CLI loader verification does not execute real provider conversations. Object
-  resource filters are preserved; the compatibility probe intentionally loads
-  managed entrypoints to test compatibility, independently of user filtering.
+- CLI loader verification does not execute real provider conversations. The
+  follow-up below corrects the original probe: it now uses the installed Pi
+  package manager’s enabled-resource resolution and honors user filtering.
 - npm transitive ranges remain upstream-controlled (notably pi-btw's tui-kit).
   The direct version/source pins are exact; this is not a fully vendored npm
   dependency closure. Unreferenced npm temporary artifacts may remain after a
@@ -169,3 +169,79 @@ criterion or version pin was weakened.
 - Upstream classifier limitations recorded in the baseline remain, including
   Codex classifier temperature incompatibility. No bypass or permission
   weakening is introduced.
+
+
+## Review follow-up — P0 probe / P1 fixture isolation
+
+Starting HEAD: `94839c6f729fa68e962645c42de8d4df87d4b579`, on
+`codex/independent-hardening-review`. This follow-up changes only the two
+requested Findings and their regression/acceptance support; no version pin or
+transaction architecture changes. Earlier results above are historical. No
+GLM development branch was viewed or reused, and no subagent was started.
+
+P0: `Transaction.probe()` now delegates resource selection to the **installed
+Pi’s** `DefaultPackageManager.resolve()` with an in-memory SettingsManager,
+project resources disabled, no builtin list and missing sources skipped. It
+passes only `enabled` extension paths to the real loader. This preserves
+package resource filters (including `extensions: []`), autoload deltas, global
+extension overrides and automatic directory discovery. It no longer adds
+`.mjs` files that Pi would not discover. The Pi 1.4.0 npm artifact’s
+`resource-loader.js` / `package-manager.js` were inspected in a newly created
+scratch directory; no later repository branch was consulted.
+
+`scripts/test-probe.mjs` creates module-evaluation markers for a disabled npm
+package, excluded package resources, an autoload-disabled resource, an excluded
+local extension and an auto-discovered `.mjs` candidate. None may execute.
+Enabled old/local, filtered, autoload and directory entrypoint commands must
+still register. Targeted runs passed on actual Pi 1.4.0 and 1.0.2 in distinct
+fresh scratch installations. The real matrix also includes this regression.
+
+P1: `real-fixture.mjs` calls the standalone scratch environment guard **before
+context/journal/CLI access**. The mutating fail-upgrade and lifecycle actions
+independently check the receipt and ownership/types, canonical HOME/TMPDIR,
+both npm prefix/cache/userconfig/globalconfig spellings, Pi agent directory,
+tmux/XDG paths and each existing component. Symlinks and hardlinks are refused.
+PATH contains only scratch `prefix/bin` and `tools/bin`; the latter holds
+content-verified launchers for the selected runtime/system binaries. Mutation
+entrypoints reject shadowed tools, then verify npm’s actual prefix, root,
+cache and config paths before invoking Transaction.install(). The offline
+probe action does not run npm preflight, so unavailable npm remains supported.
+The launchers reference read-only runtime/system tools; no host global Pi
+installation or production configuration is queried.
+
+The isolation regressions invoke `real-fixture.mjs fail-upgrade` directly,
+without caller-side `verifyScratch()`, against 26 malformed/escaping setups.
+An npm tripwire would write a marker and mutate a simulated host-global Pi
+sentinel in a separate fresh scratch directory. Every refusal must occur
+before that tripwire, and both complete directory inventories/hashes must
+remain identical. A valid environment is independently accepted as a positive
+control. These tests are included in the full offline suite.
+
+Follow-up validation (final acceptance passed):
+
+| Gate | PASS | FAIL | SKIP |
+|---|---:|---:|---:|
+| Final offline suite (one run) | 71 | 0 | 0 |
+| Final real matrix (one run) | 24 | 0 | 0 |
+| Static verification groups | 6 | 0 | 0 |
+| Real-provider conversations / physical tmux forwarding | 0 | 0 | 2 |
+
+Time log: started 2026-10-25 13:43:49 UTC (06:43:49 America/Los_Angeles).
+Code freeze / final verification start: 13:53:26 UTC (06:53:26 America/Los_Angeles), 9m37s after start. Acceptance completed: 14:03:21 UTC (07:03:21 America/Los_Angeles), elapsed 19m32s. Final verification took 9m55s; inspection/implementation/targeted testing took 9m37s. Documentation was interleaved, and local Git closure followed acceptance.
+Five targeted batches ran before freeze: isolation (26 PASS / 1 FAIL, then
+27 PASS / 0 FAIL), actual Pi 1.4.0 marker regression (PASS), actual Pi 1.0.2
+marker regression (PASS), worker/recovery subset (8 PASS / 0 FAIL). The initial
+positive-control test incorrectly compared an empty cache with the valid npm
+preflight’s new scratch logs/compile cache; its snapshot was moved after the
+allowed preflight. All negative-path full-inventory assertions were retained.
+No full suite was used during iteration.
+
+Fresh follow-up evidence is outside git under
+`/tmp/pi-review-followup.rOG2vG/`; no earlier temporary evidence or historical
+backups were reused. Final outcome: **READY_FOR_INDEPENDENT_REVIEW**. All critical gates passed before creating one local follow-up commit. Its SHA is reported in chat / `git rev-parse HEAD`.
+One full offline suite and one full real matrix were run after freeze, with no final-suite failures or reruns. The two supplemental SKIPs remain real provider conversations and physical tmux key forwarding; neither is used as proof for these Findings. Evidence files include `final-offline.log`, `final-static.log`, `final-real.log` and `final-real/results.json` (plus failed-upgrade/classifier logs).
+
+Remaining limits: this is a checked scratch harness, not an OS sandbox. It relies on trusted Node/npm/system binaries and does not protect against a hostile same-UID process racing filesystem changes after validation. Probe remains coupled to the installed pinned Pi’s resource-resolution API; actual 1.4.0 and 1.0.2 regressions and the full rollback matrix passed. The earlier general durability/dependency limits remain.
+
+No push, merge, tag, main modification or production Pi operation is authorized
+or performed in this follow-up.
