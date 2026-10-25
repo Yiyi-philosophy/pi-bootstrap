@@ -36,6 +36,23 @@ pi-bootstrap: error: …/custom-agent is UNSUPPORTED: … Nothing was changed.
 it is correctly refused rather than recovered; the point of the run is that no
 line of either file was executed.)
 
+Re-run on 2026-10-25 with a fresh probe (`/tmp/r7-verify/baseline.*`, the same
+journal shape in both directories, stubbed npm/curl that fail, no backup
+directory):
+
+```text
+=== BASELINE 98b0b0a     supported: exit=1 marker=CREATED
+                         custom:    exit=1 marker=CREATED  -> R6 reproducible
+=== HEAD 654044a         supported: exit=1 marker=absent   (refused, not recovered)
+                         custom:    exit=1 marker=absent   (UNSUPPORTED, before the journal)
+```
+
+The exit codes differ from the earlier probe because that one reached preflight
+with a working stub tree, while this one had no backups to restore from and no
+stub `node`/`npm` to proceed with; the load-bearing result is identical on both
+runs — the baseline executes a line from each journal, the fixed installer
+executes a line from neither.
+
 ## R6 — fix
 
 Three independent changes, all in `install.sh`.
@@ -126,7 +143,7 @@ than guessing.
 
 ## Regression tests
 
-New: `scripts/tests/test-journal-recovery.sh` (18 PASS, wired into
+New: `scripts/tests/test-journal-recovery.sh` (19 PASS, wired into
 `scripts/tests/run-all.sh` as *journal trust boundary (R6)*). Every case runs
 the real entry point (`bash install.sh`, no `PI_BOOTSTRAP_TEST_ONLY`) in an
 isolated `HOME`/agent dir/`TMPDIR`/npm prefix/cache/tmux config, and asserts on
@@ -144,13 +161,28 @@ the filesystem (markers, restored bytes, `sha256sum` of journal and backups,
 Run:
 
 ```bash
-scripts/tests/test-journal-recovery.sh                 # 18 PASS
+scripts/tests/test-journal-recovery.sh                 # 19 PASS
 scripts/tests/test-rollback.sh                         # recovery, SIGKILL matrix, offline cases
 scripts/tests/run-all.sh                               # offline suite
 PI_BOOTSTRAP_REAL_UPGRADE=1 PI_BOOTSTRAP_ALLOW_NETWORK=1 \
 PI_BOOTSTRAP_AGENT_DIR=… PI_BOOTSTRAP_PM_280=… PI_BOOTSTRAP_PI_PACKAGE=… \
   scripts/tests/run-all.sh --fetch                     # real pinned matrix
 ```
+
+Independent probes run on 2026-10-25 outside the suite (each in its own scratch
+tree, filesystem snapshot before/after, journal hash before/after), to check the
+gates the suite does not spell out itself:
+
+| Probe | Result |
+|---|---|
+| journal values containing `$(touch …)` / plain `touch`, supported dir, normal (non-recovery) run | refused at the reader, no marker, tree identical |
+| FIFO instead of `transaction.env`, unsupported dir | refused as UNSUPPORTED without opening it (a 25 s timeout did not fire) |
+| FIFO instead of `transaction.env`, supported dir | refused as "not a regular file", FIFO preserved |
+| `global_pi_bin` outside `<prefix>/bin` | refused, tree identical |
+| `global_npm_root` that is not `<prefix>/lib/node_modules` | refused, tree identical |
+| prefix `/`, prefix with a trailing slash | refused as "not an absolute path without '..'" |
+| ninth record, duplicate `pid`, non-canonical `%61` escape | refused, journal and backups preserved |
+| `journal_encode`/`journal_decode` round-trip, and `journal_decode_q` on real `printf '%q'` output | exact for ASCII, UTF-8, spaces, `=`, `%`, quotes |
 
 ## Verification results
 
@@ -189,6 +221,12 @@ summary: 31 passed, 1 skipped, 0 failed
 skipped: shellcheck            # not on PATH; run separately above (PASS)
 ```
 
+Re-measured on 2026-10-25 against the frozen commit `654044a`, in a fresh
+scratch tree (`/tmp/r7-verify`) built from the same pinned fixtures: offline
+`24 passed, 8 skipped, 0 failed`, real matrix `31 passed, 1 skipped, 0 failed`,
+and `test-journal-recovery.sh` `19 PASS`. ShellCheck 0.11.0 (`uvx
+--from shellcheck-py`) reports no findings.
+
 This includes the real upgrade/rollback acceptance test (Pi 1.0.2 + the old
 matrix from npm, fault injected after the new packages land, rollback proven
 by loading every restored extension on the real 1.0.2 loader, then a clean run
@@ -222,19 +260,22 @@ only local files and moved backups.
   and a manifest written by the same compromised user are not distinguishable
   from a real interrupted run. The boundary defended here is "a journal cannot
   execute code and cannot redirect writes outside the managed roots".
-- `AGENTS.md` and `backups/` are left exactly as they were found (untracked,
-  unstaged).
+- `AGENTS.md`, `backups/`, and the pre-existing `classifier-debug.log`/`latest`
+  incident artefacts are left exactly as they were found (untracked, unstaged).
 
 ## Git
 
-* Branch: `r3-closure`; exactly one local commit for this fix, its tests, the
-  README update and this report.
-* The commit SHA is printed by `git log -1 --format=%H` on `r3-closure` and is
-  quoted in the hand-off message. It is deliberately not written in this file:
-  a file cannot contain the hash of the commit that contains it.
+* Branch: `r3-closure`; the R7 fix, its tests, the README update and this
+  report are one local commit (`654044a`). A second, documentation-only commit
+  follows it with the corrected regression count and the re-measured results
+  above; no code byte changed in that commit (`install.sh` is byte-identical,
+  sha256 `dd0e326…`). No earlier commit was rewritten.
+* The final commit SHA is printed by `git log -1 --format=%H` on `r3-closure`
+  and is quoted in the hand-off message. It is deliberately not written in this
+  file: a file cannot contain the hash of the commit that contains it.
 * Not pushed, not merged, not tagged; `main` untouched; no `git add -A`.
 * Worktree after the commit: clean apart from the pre-existing untracked
-  `AGENTS.md` and `backups/`, which were left exactly as found and are **not**
-  staged.
+  `AGENTS.md`, `backups/`, `classifier-debug.log` and `latest`, which were left
+  exactly as found and are **not** staged.
 
 **Verdict: `READY_FOR_INDEPENDENT_REVIEW`.**
