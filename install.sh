@@ -88,6 +88,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
 
 export const encode = value => JSON.stringify(value, (_key, item) =>
   plain(item) ? Object.fromEntries(Object.keys(item).sort().map(k => [k, item[k]])) : item) + '\n';
@@ -473,32 +474,88 @@ export class Transaction {
     } else inventory(target, true, this.c);
   }
   async probe() {
-    const c = this.c;
-    if (!exists(c.cli)) return { version: null, commands: [] };
-    const { version, entry } = cliMetadata(c);
-    const script = `
-      import fs from 'node:fs'; import path from 'node:path'; import {pathToFileURL} from 'node:url';
-      const [cli,agent] = process.argv.slice(1);
-      const {loadExtensions} = await import(pathToFileURL(path.join(cli,'dist/core/extensions/loader.js')));
-      const {DefaultPackageManager} = await import(pathToFileURL(path.join(cli,'dist/core/package-manager.js')));
-      const {SettingsManager} = await import(pathToFileURL(path.join(cli,'dist/core/settings-manager.js')));
-      const config=fs.existsSync(path.join(agent,'settings.json'))?JSON.parse(fs.readFileSync(path.join(agent,'settings.json'),'utf8')):{};
-      // Use this installed Pi's enabled-resource semantics, including package
-      // filters, autoload deltas, user overrides and .ts/.js auto-discovery.
-      // No project resources, builtins, installs or settings writes in a probe.
-      const settingsManager=SettingsManager.inMemory(config,{projectTrusted:false});
-      const manager=new DefaultPackageManager({cwd:agent,agentDir:agent,settingsManager});
-      const resources=await manager.resolve(()=>"skip");
-      const paths=resources.extensions.filter(r=>r.enabled && !r.path.startsWith('builtin:')).map(r=>r.path);
-      const result=await loadExtensions(paths,agent);
-      if(result.errors.length) throw Error(JSON.stringify(result.errors));
-      console.log(JSON.stringify([...new Set(result.extensions.flatMap(e=>[...e.commands.keys()]))].sort()));
-    `;
-    const output = await this.run(process.execPath, ['--input-type=module', '-e', script, c.cli, c.agent], { timeout: 45000 });
-    const commands = JSON.parse(output.split('\n').at(-1));
-    const actual = await this.run(process.execPath, [entry, '--version']);
-    if (actual !== version) fail('CLI version probe failed');
-    return { version, commands };
+    const source = this.c;
+    if (!exists(source.cli)) return { version: null, commands: [] };
+    // Loading an enabled extension executes arbitrary module initialization.
+    // Never do that against the live state, including during rollback checks.
+    // These disposable copies are not recovery evidence and need no fsync.
+    for (const slot of Object.keys(source.slots)) this.checkTarget(slot);
+    const base = physical(source.env.TMPDIR || tmpdir(), false);
+    if (base.includes('*')) fail('probe TMPDIR contains a permission wildcard');
+    if (within(source.agent, base) || within(source.prefix, base)) fail('probe TMPDIR overlaps managed state');
+    const directory = fs.mkdtempSync(path.join(base, 'pi-bootstrap-probe-'));
+    try {
+      const home = path.join(directory, 'home'), prefix = path.join(directory, 'prefix');
+      const env = { ...source.env, HOME: home, TMPDIR: path.join(directory, 'tmp'),
+        PI_CODING_AGENT_DIR: path.join(home, '.pi/agent'), PI_AGENT_DIR: path.join(home, '.pi/agent'),
+        npm_config_prefix: prefix, NPM_CONFIG_PREFIX: prefix,
+        npm_config_cache: path.join(directory, 'cache'), NPM_CONFIG_CACHE: path.join(directory, 'cache'),
+        npm_config_userconfig: path.join(directory, 'npmrc'), NPM_CONFIG_USERCONFIG: path.join(directory, 'npmrc'),
+        npm_config_globalconfig: path.join(directory, 'global-npmrc'), NPM_CONFIG_GLOBALCONFIG: path.join(directory, 'global-npmrc'),
+        TMUX_CONFIG_FILE: path.join(home, '.tmux.conf'), XDG_CACHE_HOME: path.join(directory, 'cache'),
+        XDG_CONFIG_HOME: path.join(home, '.config'), PATH: path.join(prefix, 'bin') + ':' + (source.env.PATH || process.env.PATH), PI_OFFLINE: '1',
+        NODE_OPTIONS: '', NODE_PATH: '', NODE_V8_COVERAGE: '', NODE_REDIRECT_WARNINGS: '', NODE_COMPILE_CACHE: path.join(directory, 'cache') };
+      for (const p of [home, env.TMPDIR, env.npm_config_cache]) mkdir(p);
+      for (const p of [env.npm_config_userconfig, env.npm_config_globalconfig]) fs.writeFileSync(p, '', { mode: 0o600 });
+      const c = context(env);
+      for (const [slot, original] of Object.entries(source.slots)) {
+        if (!exists(original)) continue;
+        mkdir(path.dirname(c.slots[slot]));
+        fs.cpSync(original, c.slots[slot], { recursive: true, verbatimSymlinks: true, mode: fs.constants.COPYFILE_FICLONE });
+      }
+      // The pinned extensions read these user-selected permission/profile
+      // settings during module initialization. Copy data, never live paths.
+      for (const name of ['permission-modes.json', 'model-profiles.json', 'advisor.json']) {
+        const original = path.join(source.agent, name);
+        if (anchored(original, 'file', true)) {
+          mkdir(c.agent); fs.copyFileSync(original, path.join(c.agent, name));
+        }
+      }
+      mkdir(c.agent);
+      const { version, entry } = cliMetadata(c);
+      const script = `
+        import fs from 'node:fs'; import path from 'node:path'; import {pathToFileURL} from 'node:url';
+        const [cli,agent] = process.argv.slice(1);
+        const {loadExtensions} = await import(pathToFileURL(path.join(cli,'dist/core/extensions/loader.js')));
+        const {DefaultPackageManager} = await import(pathToFileURL(path.join(cli,'dist/core/package-manager.js')));
+        const {SettingsManager} = await import(pathToFileURL(path.join(cli,'dist/core/settings-manager.js')));
+        const config=fs.existsSync(path.join(agent,'settings.json'))?JSON.parse(fs.readFileSync(path.join(agent,'settings.json'),'utf8')):{};
+        // Use this installed Pi's enabled-resource semantics, including package
+        // filters, autoload deltas, user overrides and .ts/.js auto-discovery.
+        // No project resources, builtins, installs or settings writes in a probe.
+        const settingsManager=SettingsManager.inMemory(config,{projectTrusted:false});
+        const manager=new DefaultPackageManager({cwd:agent,agentDir:agent,settingsManager});
+        const inside=p=>p===agent||p.startsWith(agent+path.sep);
+        // Refuse external local resources instead of accidentally loading the
+        // original module through an absolute setting or an escaping symlink.
+        for(const pkg of config.packages||[]) {
+          const parsed=manager.parseSource(typeof pkg==='string'?pkg:pkg.source);
+          if(parsed.type==='local'&&!inside(path.resolve(agent,parsed.path))) throw Error('External local package cannot be isolated');
+        }
+        for(const value of config.extensions||[]) {
+          const local=value.replace(/^[!+-]/,'');
+          if(!local.startsWith('builtin:')&&!inside(path.resolve(agent,local))) throw Error('External local extension cannot be isolated');
+        }
+        const resources=await manager.resolve(()=>"skip");
+        const paths=resources.extensions.filter(r=>r.enabled && !r.path.startsWith('builtin:')).map(r=>r.path);
+        if(paths.some(p=>!inside(fs.realpathSync(p)))) throw Error('Extension escapes isolated probe');
+        const result=await loadExtensions(paths,agent);
+        if(result.errors.length) throw Error(JSON.stringify(result.errors));
+        console.log(JSON.stringify([...new Set(result.extensions.flatMap(e=>[...e.commands.keys()]))].sort()));
+      `;
+      // Also deny accidental absolute live paths and subprocess/native escapes.
+      // Never retry without these restrictions if a module needs more access.
+      const permissions = ['--permission', '--allow-fs-read=' + directory, '--allow-fs-write=' + directory];
+      const output = await this.run(process.execPath, [...permissions, '--input-type=module', '-e', script, c.cli, c.agent], { timeout: 45000, cwd: c.agent, env });
+      const commands = JSON.parse(output.split('\n').at(-1));
+      const actual = await this.run(process.execPath, [...permissions, entry, '--version'], { cwd: c.agent, env });
+      if (actual !== version) fail('CLI version probe failed');
+      return { version, commands };
+    } finally {
+      // Recheck the physical parent and private root before recursive cleanup.
+      if (physical(base, false) !== base) fail('probe temporary parent redirected');
+      anchored(directory, 'dir'); fs.rmSync(directory, { recursive: true });
+    }
   }
   async backup() {
     const c = this.c;

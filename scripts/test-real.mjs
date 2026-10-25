@@ -7,6 +7,7 @@ import { context, inventory, Transaction } from './bootstrap.mjs';
 import { PINS } from './pins.mjs';
 import { scratch, verifyScratch, command } from './test-support.mjs';
 import { probeAcceptance } from './test-probe.mjs';
+import { mutatingExtension } from './test-probe-side-effects.mjs';
 const repo = new URL('../', import.meta.url).pathname;
 const report = { started: new Date().toISOString(), gates: [], scratch: [] };
 const evidence = process.argv[2] || scratch('evidence').root;
@@ -66,17 +67,24 @@ try {
   cfg.packages.push('npm:permission-modes-helper@1.0.0'); cfg.userSetting = { keep: true };
   put(u.slots.settings, JSON.stringify(cfg, null, 2) + '\n');
   put(u.slots.keybindings, '{"custom":"ctrl+j"}\n'); put(u.tmux, 'set -g mouse on\n');
-  put(path.join(u.slots.extensions, 'old-probe.ts'), 'export default pi=>pi.registerCommand("old-fixture",{handler:async()=>{}});\n');
+  put(path.join(u.slots.extensions, 'old-probe.ts'), mutatingExtension('old-fixture'));
   for (const [name, value] of [['auth.json', { fixture: { type: 'api_key', key: 'scratch-only' } }], ['models.json', { providers: {} }], ['permission-modes.json', { classifier: { enabled: false }, custom: 'preserved' }]]) put(path.join(u.agent, name), JSON.stringify(value) + '\n');
   const immutable = Object.fromEntries(['auth.json', 'models.json', 'permission-modes.json'].map(name => [name, fs.readFileSync(path.join(u.agent, name), 'utf8')]));
-  const oldProbe = probe(upgrade); assert.equal(oldProbe.version, '1.0.2'); assert.ok(oldProbe.commands.includes('old-fixture'));
   const before = snapshot(u);
+  const originalBindings = fs.readFileSync(u.slots.keybindings), originalSettings = fs.readFileSync(u.slots.settings);
+  const oldProbe = probe(upgrade); assert.equal(oldProbe.version, '1.0.2'); assert.ok(oldProbe.commands.includes('old-fixture'));
+  assert.deepEqual(snapshot(u), before);
   const failed = spawnSync(process.execPath, [path.join(repo, 'scripts/real-fixture.mjs'), 'fail-upgrade'], { env: upgrade.env, cwd: upgrade.cwd, encoding: 'utf8', timeout: 240000, maxBuffer: 16 * 1024 * 1024 });
   fs.writeFileSync(path.join(evidence, 'failed-upgrade.log'), failed.stdout + failed.stderr);
   assert.equal(failed.status, 1); assert.match(failed.stderr, /failed upgrade after real CLI replacement/);
   assert.deepEqual(snapshot(u), before); assert.deepEqual(probe(upgrade), oldProbe);
+  assert.ok(fs.readFileSync(u.slots.keybindings).equals(originalBindings));
+  assert.ok(fs.readFileSync(u.slots.settings).equals(originalSettings));
+  assert.ok(fs.readFileSync(path.join(u.backup, 'keybindings')).equals(originalBindings));
+  assert.ok(fs.readFileSync(path.join(u.backup, 'settings')).equals(originalSettings));
   for (const [name, bytes] of Object.entries(immutable)) assert.equal(fs.readFileSync(path.join(u.agent, name), 'utf8'), bytes);
   pass('failed upgrade restores old 1.0.2 CLI, bin, all trees and real old loader commands');
+  pass('real top-level module side effects cannot contaminate original snapshot or rollback bytes');
 
   // A killed process and damaged settings recover without npm/curl/git/network.
   const tx = new Transaction(u); tx.lock(); tx.validate(); tx.clearPrevious();

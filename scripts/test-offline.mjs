@@ -5,7 +5,8 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { context, physical, Transaction, inventory, settingsPlan, packageIdentity, tmuxText, rejectDuplicateKeys, encode } from './bootstrap.mjs';
-import { scratch, command } from './test-support.mjs';
+import { scratch, command, verifyScratch } from './test-support.mjs';
+import { seedMutatingExtension } from './test-probe-side-effects.mjs';
 import { PINS } from './pins.mjs';
 import './test-fixture-isolation.mjs';
 
@@ -23,6 +24,95 @@ function fixture() {
   return { s, c, tx };
 }
 const snapshot = c => Object.fromEntries(Object.entries(c.slots).map(([slot, p]) => [slot, inventory(p, slot === 'bin', c)]));
+function loaderFixture() {
+  // This small loader is an offline test double. The full real matrix repeats
+  // the same mutation/failure assertions with actual Pi 1.0.2 and 1.4.0.
+  const s = verifyScratch(scratch('probe-effects')), c = context(s.env);
+  put(path.join(c.cli, 'package.json'), JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '1.0.2', type: 'module', bin: { pi: 'dist/cli.js' } }));
+  put(path.join(c.cli, 'dist/cli.js'), "console.log(JSON.parse((await import('node:fs')).readFileSync(new URL('../package.json',import.meta.url))).version);\n");
+  put(path.join(c.cli, 'dist/core/settings-manager.js'), 'export class SettingsManager { static inMemory(config){return config;} }\n');
+  put(path.join(c.cli, 'dist/core/package-manager.js'), `import fs from 'node:fs';import path from 'node:path';
+export class DefaultPackageManager {
+  constructor(options){this.agent=options.agentDir;}
+  parseSource(){return {type:'npm'};}
+  async resolve(){return {extensions:fs.readdirSync(path.join(this.agent,'extensions')).filter(f=>f.endsWith('.js')).map(f=>({path:path.join(this.agent,'extensions',f),enabled:true}))};}
+}\n`);
+  put(path.join(c.cli, 'dist/core/extensions/loader.js'), `import {pathToFileURL} from 'node:url';
+export async function loadExtensions(paths){
+  const commands=new Map();for(const file of paths)(await import(pathToFileURL(file))).default({registerCommand:(n,d)=>commands.set(n,d)});
+  return {errors:[],extensions:[{commands}]};
+}\n`);
+  put(c.slots.settings, '{ "packages": [], "preserve": "字节" }\r\n');
+  put(c.slots.keybindings, '{ "custom": "ctrl+j" }\r\n');
+  put(c.tmux, 'set -g mouse on\n');
+  seedMutatingExtension(c.agent);
+  return { s, c, tx: new Transaction(c) };
+}
+test('isolated probe executes mutating module initialization without changing live managed bytes', async () => {
+  const { c, tx, s } = loaderFixture(), before = snapshot(c);
+  const result = await tx.probe(); assert.ok(result.commands.includes('probe-mutator'));
+  assert.deepEqual(snapshot(c), before);
+  assert.equal(fs.readdirSync(s.env.TMPDIR).some(n => n.startsWith('pi-bootstrap-probe-')), false);
+});
+test('failed upgrade restores original pre-probe bytes despite module initialization mutations', async () => {
+  const { c, tx } = loaderFixture(), before = snapshot(c);
+  tx.stage = async () => { const stage = path.join(c.state, 'stage'); fs.mkdirSync(stage); return { stage }; };
+  let failedAfterCli = false;
+  tx.checkpoint = phase => { if (phase === 'after:cli') { failedAfterCli = true; throw Error('injected upgrade failure after CLI replacement'); } };
+  const runner = async (cmd, args, options) => {
+    if (cmd === 'npm' && args[0] === 'prefix') return c.prefix;
+    if (cmd === 'npm' && args[0] === 'root') return path.join(c.prefix, 'lib/node_modules');
+    if (cmd === 'npm' && args[0] === 'install') {
+      const file = path.join(c.cli, 'package.json'), pkg = JSON.parse(fs.readFileSync(file));
+      pkg.version = '1.4.0'; put(file, JSON.stringify(pkg)); put(c.slots.keybindings, 'upgrade damage'); return '';
+    }
+    tx.runner = undefined;
+    try { return await tx.run(cmd, args, options); } finally { tx.runner = runner; }
+  };
+  tx.runner = runner;
+  await assert.rejects(() => tx.install('unused'), /injected upgrade failure after CLI replacement/);
+  assert.equal(failedAfterCli, true); assert.deepEqual(snapshot(c), before);
+  const manifest = JSON.parse(fs.readFileSync(path.join(c.backup, 'manifest.json')));
+  assert.ok(manifest.probe.commands.includes('probe-mutator'));
+  assert.equal(fs.readFileSync(path.join(c.backup, 'keybindings'), 'utf8'), '{ "custom": "ctrl+j" }\r\n');
+  assert.equal(JSON.parse(fs.readFileSync(c.journal)).status, 'rolledback');
+});
+test('probe rejects an absolute live write and leaves original bytes intact', async () => {
+  const { c, tx } = loaderFixture();
+  put(path.join(c.slots.extensions, 'probe-mutator.js'), `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(c.slots.keybindings)},'escaped write');export default()=>{};`);
+  const before = snapshot(c);
+  await assert.rejects(() => tx.probe(), /ERR_ACCESS_DENIED/);
+  assert.deepEqual(snapshot(c), before);
+});
+test('probe module failure keeps the original tree and removes its disposable copy', async () => {
+  const { c, tx, s } = loaderFixture();
+  const file = path.join(c.slots.extensions, 'probe-mutator.js'); fs.appendFileSync(file, "throw Error('module initialization failure');\n");
+  const before = snapshot(c);
+  await assert.rejects(() => tx.probe(), /module initialization failure/);
+  assert.deepEqual(snapshot(c), before);
+  assert.equal(fs.readdirSync(s.env.TMPDIR).some(n => n.startsWith('pi-bootstrap-probe-')), false);
+});
+test('probe refuses TMPDIR inside a managed tree before creating a copy', async () => {
+  const { c } = loaderFixture(), before = snapshot(c);
+  const tx = new Transaction({ ...c, env: { ...c.env, TMPDIR: c.slots.extensions } });
+  await assert.rejects(() => tx.probe(), /TMPDIR overlaps/);
+  assert.deepEqual(snapshot(c), before);
+});
+test('probe refuses wildcard TMPDIR rather than broadening Node filesystem permissions', async () => {
+  const { c, s } = loaderFixture(), base = path.join(s.root, 'wild*temp'); fs.mkdirSync(base);
+  const before = snapshot(c), tx = new Transaction({ ...c, env: { ...c.env, TMPDIR: base } });
+  await assert.rejects(() => tx.probe(), /permission wildcard/);
+  assert.deepEqual(snapshot(c), before); assert.deepEqual(fs.readdirSync(base), []);
+});
+test('probe refuses an external configured extension without loading its original module', async () => {
+  const { c, tx, s } = loaderFixture();
+  const file = path.join(s.root, 'external.js'), marker = path.join(s.root, 'EXTERNAL_EXECUTED');
+  put(file, `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(marker)},'executed');export default()=>{};`);
+  put(c.slots.settings, JSON.stringify({ packages: [], extensions: [file] }));
+  const before = snapshot(c);
+  await assert.rejects(() => tx.probe(), /External local extension/);
+  assert.deepEqual(snapshot(c), before); assert.equal(fs.existsSync(marker), false);
+});
 function rewriteManifest(c, change) {
   const p = path.join(c.backup, 'manifest.json'), m = JSON.parse(fs.readFileSync(p)); change(m); fs.writeFileSync(p, encode(m));
   const j = JSON.parse(fs.readFileSync(c.journal)); j.manifest = sha(fs.readFileSync(p)); fs.writeFileSync(c.journal, encode(j));

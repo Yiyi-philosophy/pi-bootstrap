@@ -245,3 +245,90 @@ Remaining limits: this is a checked scratch harness, not an OS sandbox. It relie
 
 No push, merge, tag, main modification or production Pi operation is authorized
 or performed in this follow-up.
+
+
+## Final review follow-up — probe side effects before backup
+
+Starting HEAD: `bd8ff652ef71251f92e39d569ea8991d277f3f01`, on
+`codex/independent-hardening-review`. This section supersedes earlier acceptance
+counts for the final snapshot-contamination Finding. No GLM development branch
+was read or reused; no subagent or unbounded fuzzing was used.
+
+The fix is confined to `probe()` and its generated installer copy. The existing
+journal/manifest format, durable backup order, restoration logic, exact pins and
+permission rules remain unchanged. Every probe (including pre-backup,
+post-install, idempotence and recovery validation) now copies the anchored
+managed slots into a private temporary HOME/agent/CLI prefix. The copy also
+contains the permission/profile/advisor JSON needed by the pinned extensions.
+It does not include the original journal, backups, auth.json or models.json.
+Verification uses the copied CLI and copied enabled extension entrypoints.
+Temporary copies are disposable verification inputs, not recovery evidence;
+COPYFILE_FICLONE is requested as an optimization, never a hardlink to live data.
+
+HOME, cwd, agent, tmux, npm prefix/cache/userconfig/globalconfig and XDG paths
+point into the copy. Node preload/output-cache variables are cleared or rebased.
+The subprocess has Node filesystem read/write permissions only for that private
+copy; child processes, workers, native addons and WASI are not enabled. A failed
+probe is never retried with broader permissions. An accidental absolute write
+to the original managed file is refused. External local resource settings and
+entrypoints resolving outside the copied agent are refused before module
+loading. A managed-root TMPDIR or permission-wildcard path is refused before
+creating the copy. Cleanup revalidates its physical parent/private root; a
+killed process can leave an inert temporary copy for later manual cleanup.
+
+The Node flags exist in the repository's minimum supported Node 22.19.0;
+runtime acceptance here uses Node 24.22.1. This is additional protection for
+accidental module-initialization effects, **not a hostile-code sandbox**. See
+[the Node 22.19 permission-model contract and limits](https://nodejs.org/download/release/v22.19.0/docs/api/permissions.html).
+A deliberately malicious extension or hostile same-UID process remains outside
+this protection model. Custom extensions requiring external files, child
+processes or native addons during loading are refused instead of being granted
+access. Absolute local resource settings requiring the original location are
+also refused; the default pinned matrix and relative managed resources remain
+supported. Copying CLI/package trees adds temporary disk/copy overhead.
+
+Regression evidence:
+
+- Seven offline regression cases cover actual module evaluation in a small
+  explicitly labeled loader test double: writes through HOME, module dirname,
+  npm-tree and tmux paths; upgrade failure after CLI replacement; exact original
+  bytes and backup bytes after rollback; absolute original-path write denial;
+  initializer exceptions/cleanup; overlapping/wildcard TMPDIR; external-module
+  refusal. The registered command proves the mutating initializer ran.
+- The real matrix uses the same mutating extension with the actual old Pi
+  1.0.2 loader. It captures inventories and exact settings/keybinding bytes
+  **before the first probe**, then forces an actual upgrade failure, checks the
+  original backup bytes and final restored bytes, and repeats real old-loader
+  verification. This catches contamination both before backup and after restore.
+- Separate scratch-only targeted probes on actual Pi 1.0.2 and 1.4.0 passed;
+  the 1.4.0 run also repeated enabled-resource/filter/autoload regressions.
+- All test package operations use fresh scratch roots and the independent
+  environment guard. No production Pi, configuration, credentials or historical
+  backup was read or modified. Evidence stays outside Git under
+  `/tmp/pi-probe-snapshot-fix.1Zi6K6/`.
+
+| Final gate (one run each after freeze) | PASS | FAIL | SKIP |
+|---|---:|---:|---:|
+| Offline suite | 78 | 0 | 0 |
+| Real version/upgrade/rollback matrix | 25 | 0 | 0 |
+| Syntax, generated-source sync, ShellCheck and whitespace groups | 6 | 0 | 0 |
+| Real provider conversations / physical tmux forwarding | 0 | 0 | 2 |
+
+Time log: started 2026-10-25 15:10:19 UTC (08:10:19 America/Los_Angeles).
+Freeze/final verification: 15:20:48 UTC (08:20:48 America/Los_Angeles), 10m29s after start. Acceptance completed: 15:31:19 UTC (08:31:19 America/Los_Angeles), 21m00s after start. Final verification took 10m31s; inspection, implementation and targeted verification took 10m29s. Documentation was interleaved; local commit and push followed acceptance.
+Six targeted batches ran before freeze: one actual 1.0.2 empty probe; offline
+4/4 effects regressions; actual 1.0.2 mutating module; offline 6/6 including
+path/cleanup cases; actual 1.4.0 filtering plus mutation; wildcard regression
+1/1. All passed. No full network matrix was used for iteration.
+
+Final outcome: **READY_FOR_INDEPENDENT_REVIEW**. All critical gates passed.
+One full offline suite and one full real matrix ran after freeze with no final
+failures or reruns. Supplemental SKIPs remain real provider conversations and
+physical tmux forwarding, neither used as proof for this Finding. Evidence:
+`final-offline.log`, `final-static.log`, `final-real/results.json`,
+`final-real/failed-upgrade.log`, `final-real/classifier-requests.json`.
+
+One local follow-up commit is created only after these checks, and the user
+authorized pushing it exclusively to `origin/codex/independent-hardening-review`.
+The commit SHA and verified remote result are reported in chat; this report is
+inside that commit. No main push, merge, tag, publication or unrelated refactor.
