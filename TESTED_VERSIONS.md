@@ -1,13 +1,15 @@
 # Tested versions
 
-Last verified: 2026-10-22
+Independent hardening verification: 2026-10-25 (see `docs/independent-hardening-report.md`).
+
+The historical October 22 records below remain provenance, not evidence for the independent run. The current acceptance uses the committed scratch harnesses, a fresh exact matrix, actual Pi 1.0.2 rollback, and loopback HTTP fixtures.
 
 ## Default stack
 
 | Component | Version | Source | Status |
 |---|---:|---|---|
 | Pi Coding Agent | 1.4.0 | npm | PASS: isolated install, RPC and TUI startup, extension loading under Node 24.14.0 |
-| permission-modes | 2.8.0 | pinned upstream commit `cf77816f28e102409dddbf8e537e4cf57aa092f0` (git source, **not an npm release**) | PASS: installed via `pi install git:…@<sha>`, verified against a 69-file SHA256 manifest; all gate and classifier tests below |
+| permission-modes | 2.8.0 | pinned upstream commit `cf77816f28e102409dddbf8e537e4cf57aa092f0` (git source, **not an npm release**) | Source is verified before execution: exact commit/tree, 69-file SHA256 manifest, then placed in the managed git tree; independent real-loader/classifier evidence is in the hardening report |
 | pi-btw | 0.62.0 | npm | PASS: installed and registered `/btw`; TUI side question completed against a local fixture |
 | pi-advisor-flow | 0.14.2 | npm | PASS: `/advisor`, `/advisor-models`, `/advisor-settings`, `/advisor-stats` registered; selector save, no-credential error path, and a full `ask_advisor` consultation against a local fixture verified |
 | classifier-model | repository version (unchanged) | local | PASS: registered under Pi 1.4.0; full JSON-safety battery re-run (merge, disable, timeouts, permissions, invalid JSON, atomic writes, reload) |
