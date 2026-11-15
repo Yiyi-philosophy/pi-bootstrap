@@ -1,0 +1,322 @@
+{
+  "auditDate": "2026-11-14",
+  "timezone": "America/Los_Angeles",
+  "baseCommit": "a4fea2bcc70ca62b97b988d4efb3de0b6cc7a8ef",
+  "environment": {
+    "node": "24.22.1",
+    "npm": "11.19.1",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "matrix": {
+    "pi": "1.5.2",
+    "btw": "0.63.8",
+    "advisor": "0.15.1",
+    "permissionModes": {
+      "version": "2.8.0",
+      "source": "git snapshot; not npm",
+      "commit": "cf77816f28e102409dddbf8e537e4cf57aa092f0",
+      "tree": "480649739171c272f355850cf6b6228ffa823c0c",
+      "trackedFiles": 69
+    },
+    "minimal": {
+      "url": "https://raw.githubusercontent.com/earendil-works/pi/v1.5.2/packages/coding-agent/examples/extensions/minimal-mode.ts",
+      "sha256": "040cbc7619b2e903888c8626e2fa55ca5e3f820535dfd1aadcb2060e156a8770"
+    }
+  },
+  "metadata": [
+    {
+      "package": "@earendil-works/pi-coding-agent",
+      "latest": "1.5.2",
+      "published": "2026-11-10T12:24:55.226Z",
+      "engines": {
+        "node": ">=22.19.0"
+      },
+      "integrity": "sha512-mUWI04rqF1Vd/m1q+Ps1XeWsTXEVvRUnsmRa83I3Dzua0Tx5bYS93imeqtIfrXf7PkkaR6ERz+AuQhIJlom5yA=="
+    },
+    {
+      "package": "@narumitw/pi-btw",
+      "latest": "0.63.8",
+      "published": "2026-11-11T19:16:53.660Z",
+      "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-tui": "*",
+        "@earendil-works/pi-coding-agent": "*"
+      },
+      "integrity": "sha512-dskbX1uMMY03ZF2v+EvkIc94L7PM+dfAEu8AL3771TXEa94SwsjPnjN7/DUDDHglmyWA7l/w/7UWh4EcPZYxlQ=="
+    },
+    {
+      "package": "pi-advisor-flow",
+      "latest": "0.15.1",
+      "published": "2026-11-14T11:38:42.418Z",
+      "peerDependencies": {
+        "typebox": "^1.1.38",
+        "@earendil-works/pi-ai": "^1.0.0",
+        "@earendil-works/pi-tui": "^1.0.0",
+        "@earendil-works/pi-coding-agent": "^1.0.0"
+      },
+      "integrity": "sha512-CSNKUpr9B8mnMWxTQaxeywyAZDSWCFYm59SQ4r417XMFSDEsSX55DwQS2Mr8B32R3vbEgqvs7IOvOEcTG3BCHA=="
+    },
+    {
+      "package": "@georgedong32/permission-modes",
+      "latest": "2.7.0",
+      "published": "2026-09-12T14:08:47.355Z",
+      "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+        "typebox": "*"
+      },
+      "integrity": "sha512-Kzi2KBy7XNu0KaGNfuo0v1xKlq+6wPpK9hsiVpOjT2DzzuSu3eKxbHRiYdATvQcYIq0fy3GV7M5gDLIs7ybdPA=="
+    }
+  ],
+  "acceptance": {
+    "status": "PASS",
+    "gates": [
+      {
+        "name": "fresh exact pinned matrix and five real loaded extensions",
+        "status": "PASS"
+      },
+      {
+        "name": "repeat installer has byte-identical managed trees and retained evidence",
+        "status": "PASS"
+      },
+      {
+        "name": "probe honors disabled/filter/autoload resources, excludes auto-discovered mjs and verifies enabled old commands",
+        "status": "PASS"
+      },
+      {
+        "name": "real Pi package-manager lifecycle suppression proven with positive control",
+        "status": "PASS"
+      },
+      {
+        "name": "failed upgrade restores old 1.0.2 CLI, bin, all trees and real old loader commands",
+        "status": "PASS"
+      },
+      {
+        "name": "real top-level module side effects cannot contaminate original snapshot or rollback bytes",
+        "status": "PASS"
+      },
+      {
+        "name": "real old CLI offline recovery with invalid settings and unavailable package/network tools",
+        "status": "PASS"
+      },
+      {
+        "name": "real npm-to-source object migration preserves unrelated packages/config/credentials",
+        "status": "PASS"
+      },
+      {
+        "name": "failed upgrade restores current-main Pi 1.4.0 matrix and real loader commands",
+        "status": "PASS"
+      },
+      {
+        "name": "current-main 1.4.0 matrix upgrades preserving auth/models/permissions/advisor/user settings",
+        "status": "PASS"
+      },
+      {
+        "name": "permission-modes 2.7.0 resolved-baseUrl regression reproduced",
+        "status": "PASS"
+      },
+      {
+        "name": "2.8.0 real registry custom-baseUrl allow",
+        "status": "PASS"
+      },
+      {
+        "name": "2.8.0 real registry custom-baseUrl deny",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier malformed fails closed without SDK retries",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier empty fails closed without SDK retries",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier timeout fails closed without SDK retries",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier http-error fails closed without SDK retries",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate allow and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate deny and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate malformed and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate empty and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate timeout and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate http-error and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real ask dangerous Bash/PowerShell/embedded/outside-cwd write gates",
+        "status": "PASS"
+      },
+      {
+        "name": "real plan dangerous Bash/PowerShell/embedded/outside-cwd write gates",
+        "status": "PASS"
+      },
+      {
+        "name": "real auto dangerous Bash/PowerShell/embedded/outside-cwd write gates",
+        "status": "PASS"
+      },
+      {
+        "name": "Ask read-only action remains available",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier selector merges, disables, preserves timeout/rules and invokes reload",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier rejects invalid JSON, defaults timeout and preserves original on atomic-write failure",
+        "status": "PASS"
+      },
+      {
+        "name": "advisor-models renders real selectors and saves chosen Advisor with current-session Executor",
+        "status": "PASS"
+      },
+      {
+        "name": "advisor activation and ask_advisor complete through real registry and loopback HTTP",
+        "status": "PASS"
+      },
+      {
+        "name": "advisor missing-credential error makes no HTTP request",
+        "status": "PASS"
+      },
+      {
+        "name": "btw command renders answer/composer, completes a tools-free side request and closes",
+        "status": "PASS"
+      },
+      {
+        "name": "actual Pi RPC startup registers all default commands",
+        "status": "PASS"
+      }
+    ],
+    "offline": {
+      "passed": 78,
+      "failed": 0
+    },
+    "shellcheck": "SKIP: executable unavailable",
+    "rpcCommands": [
+      "classifier-model",
+      "btw",
+      "advisor-manual",
+      "advisor",
+      "advisor-models",
+      "advisor-stats",
+      "advisor-settings",
+      "advisor-off",
+      "ask",
+      "plan",
+      "auto",
+      "bypass",
+      "permissions",
+      "mode",
+      "plan-execute",
+      "model-profile",
+      "outside-writes",
+      "undo-outside-writes",
+      "llama",
+      "mcp"
+    ],
+    "optional": [
+      {
+        "spec": "pi-subagents@0.88.1",
+        "status": "TESTED (load)",
+        "commands": [
+          "subagents-watchdog",
+          "subagents",
+          "run",
+          "subagent-cost",
+          "subagents-doctor",
+          "subagents-inspect-rpc",
+          "subagents-guide",
+          "subagents-refine",
+          "subagents-fleet",
+          "subagents-detach",
+          "subagents-stop",
+          "subagents-steer",
+          "prompt-workflow",
+          "subagents-models",
+          "subagents-profiles",
+          "subagents-load-profile",
+          "subagents-refresh-provider-models",
+          "subagents-generate-profiles",
+          "subagents-check-profile"
+        ]
+      },
+      {
+        "spec": "@narumitw/pi-subagents@3.4.5",
+        "status": "TESTED (load)",
+        "commands": [
+          "subagents"
+        ]
+      },
+      {
+        "spec": "pi-mcp-adapter@7.0.1",
+        "status": "TESTED (load)",
+        "commands": [
+          "mcp-adapter",
+          "mcp",
+          "mcp-auth"
+        ]
+      },
+      {
+        "spec": "@narumitw/pi-lsp@0.49.12",
+        "status": "TESTED (load)",
+        "commands": [
+          "lsp"
+        ]
+      }
+    ]
+  },
+  "assembly": "Core install/repeat/probe/lifecycle/rollback/recovery gates plus focused current-main, migration, classifier, command and RPC runs. Committed test-real.mjs integrates the same acceptance assertions; the complete integrated runner was not rerun as one process after adoption. Final install.sh is byte-identical to the tested candidate.",
+  "earlierAttempts": [
+    {
+      "result": "historical fixture failed before upgrade",
+      "cause": "Pi 1.0.2 floating internals resolved to 1.5.2; corrected with publication cutoff",
+      "resolution": "working old loader, rollback, offline recovery and migration passed"
+    },
+    {
+      "result": "migration installer wrapper reached 240-second test timeout during final validation",
+      "resolution": "test-only timeout raised to 600 seconds; migration repeated from the verified old snapshot and passed; original evidence retained"
+    },
+    {
+      "result": "optional fixture denied ancestor filesystem discovery",
+      "resolution": "isolated project root and untrusted in-memory settings used; all four separate loads passed without broadening filesystem permissions"
+    }
+  ],
+  "artifacts": {
+    "installerSha256": "bdc4648e134422560d41ba0a3b00af739a69e058c1090bb50e4803fcdb26d815",
+    "candidateInstallerSha256": "bdc4648e134422560d41ba0a3b00af739a69e058c1090bb50e4803fcdb26d815",
+    "testRealSha256": "774c16e628d94e05bcbf116fcbb619b3474979af61191338547f4604de2ab876",
+    "testCommandsSha256": "d90773dec71e12ea5a46a55091c71b4b0f4b06dc2be200f4600c872f52a92808",
+    "classifierLogSha256": "2008c4a0018e3f6655aa0cdb55f5730470c3db5eaf80e471620844068956ce5a",
+    "commandsLogSha256": "f29802159796cc2d4f20983d68f6146bedddfa817db5ce27312b15297e818e14"
+  },
+  "limits": [
+    "No real provider credentials or external inference requests",
+    "Controlled UI renders real components; fullscreen handoff bypassed",
+    "No physical terminal/tmux/mouse/split-pane certification",
+    "Optional package functionality, virtual Advisor routing and header-only auth not exercised",
+    "Historical upstream unit-test/typecheck results not rerun"
+  ]
+}

@@ -35,7 +35,7 @@ See [`TESTED_VERSIONS.md`](TESTED_VERSIONS.md) for the full list. In short: perm
 
 ### Core
 
-- Pi Coding Agent: `@earendil-works/pi-coding-agent@1.4.0`
+- Pi Coding Agent: `@earendil-works/pi-coding-agent@1.5.2`
 - `permission-modes` 2.8.0 from the pinned upstream commit `cf77816f28e102409dddbf8e537e4cf57aa092f0`
 - The local [`extensions/classifier-model.ts`](extensions/classifier-model.ts), which adds `/classifier-model`
 
@@ -43,13 +43,15 @@ See [`TESTED_VERSIONS.md`](TESTED_VERSIONS.md) for the full list. In short: perm
 
 ### Default convenience extensions
 
-- `@narumitw/pi-btw@0.62.0` for `/btw` side questions
-- `pi-advisor-flow@0.14.2` for `/advisor`, `/advisor-models`, `/advisor-settings`, and `/advisor-stats`
-- The official Pi `minimal-mode.ts` example from Pi `v1.4.0`
+- `@narumitw/pi-btw@0.63.8` for `/btw` side questions
+- `pi-advisor-flow@0.15.1` for `/advisor`, `/advisor-models`, `/advisor-settings`, and `/advisor-stats`
+- The official Pi `minimal-mode.ts` example from Pi `v1.5.2`
 
-The pinned source URL is `https://raw.githubusercontent.com/earendil-works/pi/v1.4.0/packages/coding-agent/examples/extensions/minimal-mode.ts`, and its SHA256 is pinned and verified so a re-tagged release cannot change the installed bytes.
+The pinned source URL is `https://raw.githubusercontent.com/earendil-works/pi/v1.5.2/packages/coding-agent/examples/extensions/minimal-mode.ts`, and its SHA256 is pinned and verified so a re-tagged release cannot change the installed bytes.
 
-Pi `1.4.0` requires Node.js `>=22.19.0`.
+Pi `1.5.2` requires Node.js `>=22.19.0`.
+
+When upgrading from 1.4.0, Pi renames the Azure provider from `azure-openai-responses` to `azure`; Azure users must migrate their provider references according to the upstream release notes. Pi also changes the default `cacheWarming` from `streaming` to `idle`; set `"cacheWarming": "streaming"` in Pi settings to retain the previous behavior. The bootstrap preserves existing configuration and does not perform either change for you.
 
 The installer also merges `app.thinking.cycle = "ctrl+shift+tab"` into `~/.pi/agent/keybindings.json`.
 
@@ -85,7 +87,7 @@ Settings are maintained in a small idempotent block in `~/.tmux.conf`. The insta
 
 ## Optional extensions
 
-These are intentionally not installed by the bootstrap. No optional version is certified in this snapshot. As of 2026-10-22, `pi-subagents@0.80.0` (29 commands), `@narumitw/pi-subagents@3.3.0`, `pi-mcp-adapter@5.4.0`, and `@narumitw/pi-lsp@0.49.10` install and load on Pi 1.4.0 with registration verified, but their core functionality was not exercised; `pi-openai-service-tier@0.1.4` still targets pre-1.0 package metadata. Pi has built-in MCP support, which is preferred over adapters for standard MCP use. After an audit records an exact tested version, install it explicitly (replace `<TESTED_VERSION>`):
+These are intentionally not installed by the bootstrap. No optional version is certified in this snapshot. On 2026-11-14, `pi-subagents@0.88.1`, `@narumitw/pi-subagents@3.4.5`, `pi-mcp-adapter@7.0.1`, and `@narumitw/pi-lsp@0.49.12` installed and loaded individually on Pi 1.5.2 with command registration verified; child agents, MCP connections, and language servers were not exercised. The two subagents packages both register `/subagents`; choose one. The adapter registers `/mcp`, overlapping Pi's built-in command; prefer built-in MCP support. `pi-openai-service-tier@0.1.4` still targets pre-1.0 package metadata and remains excluded from certification. After reviewing the load-only evidence in [`TESTED_VERSIONS.md`](TESTED_VERSIONS.md), install a chosen optional package explicitly (replace `<TESTED_VERSION>`):
 
 ```bash
 # OpenAI/Codex service tier controls (not currently a certification candidate)
@@ -136,11 +138,11 @@ scripts/check-embedded-extension.sh
 
 ## Upgrade policy
 
-Monthly maintenance starts by finding the newest stable Pi and stable releases of the default and optional extensions. It checks package metadata, peer dependencies, changelogs, Pi release documentation, and the exact Pi-bound files. If any core component is incompatible, the previous confirmed-good matrix remains in place. The maintenance instructions are in [`docs/monthly-maintenance-prompt.md`](docs/monthly-maintenance-prompt.md); the 2026-10 upgrade evidence is in [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md) and [`docs/upgrade-risk-review.md`](docs/upgrade-risk-review.md).
+Monthly maintenance starts by finding the newest stable Pi and stable releases of the default and optional extensions. It checks package metadata, peer dependencies, changelogs, Pi release documentation, and the exact Pi-bound files. If any core component is incompatible, the previous confirmed-good matrix remains in place. The maintenance instructions are in [`docs/monthly-maintenance-prompt.md`](docs/monthly-maintenance-prompt.md); the current upgrade evidence is in [`docs/upgrade-audit-2026-11.md`](docs/upgrade-audit-2026-11.md). Historical 2026-10 evidence is in [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md) and [`docs/upgrade-risk-review.md`](docs/upgrade-risk-review.md).
 
 ## Upstream API verification
 
-The classifier extension uses Pi's current APIs for the pinned release: `pi.registerCommand`, `ctx.hasUI`, `ctx.modelRegistry.refresh()`, `ctx.modelRegistry.getAvailable()`, `ctx.ui.select()`, and command-context `ctx.reload()`. All are present and unchanged in Pi 1.4.0's release declarations.
+The classifier extension uses Pi's current APIs for the pinned release: `pi.registerCommand`, `ctx.hasUI`, `ctx.modelRegistry.refresh()`, `ctx.modelRegistry.getAvailable()`, `ctx.ui.select()`, and command-context `ctx.reload()`. All are present and unchanged in Pi 1.5.2's release declarations.
 
 ## Testing
 
@@ -154,4 +156,4 @@ node --test scripts/test-offline.mjs
 node scripts/test-real.mjs /absolute/scratch/evidence-directory
 ```
 
-The final real suite installs the exact matrix in a fresh home, checks repeat-run filesystem identity, proves npm lifecycle suppression, upgrades an actual Pi 1.0.2 stack, injects failure after CLI replacement, compares restored inventories and old loader commands, exercises offline recovery with broken settings, then tests migration and the local HTTP classifier/gates. It performs no real provider requests. The tmux release branches are stubbed transformations; terminal key forwarding is not certified. See [`docs/independent-hardening-report.md`](docs/independent-hardening-report.md) for the independent verification record and remaining limits.
+The real suite installs the exact matrix in a fresh home, checks repeat-run filesystem identity, and proves npm lifecycle suppression. It exercises classifier selection, real Advisor selectors and consultation, and `/btw` through loopback HTTP with controlled UI input. It upgrades actual Pi 1.0.2 and previous-main 1.4.0 stacks, injects failures after CLI replacement, compares restored inventories and loader commands, verifies offline recovery, and exercises migration and classifier safety gates. Historical Pi 1.0.2 is installed with a publication cutoff so its floating internal dependency ranges cannot silently select today's runtime. Snapshot-heavy installer tests allow ten minutes; production subprocess limits are unchanged. Tests perform no real provider requests. Physical terminal forwarding, mouse interaction, and split-pane behavior are not certified. See [`docs/upgrade-audit-2026-11.md`](docs/upgrade-audit-2026-11.md) for this run and [`docs/independent-hardening-report.md`](docs/independent-hardening-report.md) for historical hardening evidence.
