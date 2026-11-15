@@ -14,6 +14,14 @@ if (process.argv[2] === 'fail-upgrade') {
   catch (error) { console.error(error); process.exitCode = 1; }
 } else if (process.argv[2] === 'probe') {
   console.log(JSON.stringify(await new Transaction(c).probe()));
+} else if (process.argv[2] === 'rpc') {
+  const { RpcClient } = await import(pathToFileURL(path.join(c.cli, 'dist/modes/rpc/rpc-client.js')));
+  const pkg = JSON.parse(fs.readFileSync(path.join(c.cli, 'package.json')));
+  const client = new RpcClient({ cliPath: path.join(c.cli, pkg.bin.pi), cwd: c.home, env: process.env, args: ['--no-session'] });
+  try {
+    await client.start();
+    console.log(JSON.stringify(await client.getCommands()));
+  } finally { await client.stop(); }
 } else if (process.argv[2] === 'lifecycle') {
   const load = rel => import(pathToFileURL(path.join(c.cli, rel)));
   const { DefaultPackageManager } = await load('dist/core/package-manager.js');

@@ -1,11 +1,11 @@
 export const PINS = {
-  "pi": "1.4.0",
-  "btw": "0.62.0",
-  "advisor": "0.14.2",
+  "pi": "1.5.2",
+  "btw": "0.63.8",
+  "advisor": "0.15.1",
   "pmVersion": "2.8.0",
   "pmCommit": "cf77816f28e102409dddbf8e537e4cf57aa092f0",
   "pmTree": "480649739171c272f355850cf6b6228ffa823c0c",
-  "minimalUrl": "https://raw.githubusercontent.com/earendil-works/pi/v1.4.0/packages/coding-agent/examples/extensions/minimal-mode.ts",
+  "minimalUrl": "https://raw.githubusercontent.com/earendil-works/pi/v1.5.2/packages/coding-agent/examples/extensions/minimal-mode.ts",
   "minimalSha256": "040cbc7619b2e903888c8626e2fa55ca5e3f820535dfd1aadcb2060e156a8770",
   "pmManifest": {
     "AGENTS.md": "8f6c12d90033922d595c78fc90bd1701a90cd9ecef39cee659b3f55d7ee59087",

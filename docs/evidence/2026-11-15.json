@@ -1,0 +1,539 @@
+{
+  "auditDate": "2026-11-15",
+  "timezone": "America/Los_Angeles",
+  "candidateBaseCommit": "bc4cbe1d8d91752fcf006916fcda641341d87364",
+  "scope": "Close only the complete integrated acceptance and ShellCheck gaps; retain all pins and installer bytes.",
+  "status": "READY_FOR_INDEPENDENT_REVIEW",
+  "timing": {
+    "started": "2026-11-15T13:00:55.000Z",
+    "validationFinished": "2026-11-15T13:41:22.305Z",
+    "elapsedThroughEvidenceSeconds": 2427
+  },
+  "environment": {
+    "node": "24.22.1",
+    "npm": "11.19.1",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "matrix": {
+    "pi": "1.5.2",
+    "btw": "0.63.8",
+    "advisor": "0.15.1",
+    "permissionModes": {
+      "version": "2.8.0",
+      "source": "git snapshot; not npm",
+      "commit": "cf77816f28e102409dddbf8e537e4cf57aa092f0",
+      "tree": "480649739171c272f355850cf6b6228ffa823c0c",
+      "trackedFiles": 69
+    },
+    "minimal": {
+      "url": "https://raw.githubusercontent.com/earendil-works/pi/v1.5.2/packages/coding-agent/examples/extensions/minimal-mode.ts",
+      "sha256": "040cbc7619b2e903888c8626e2fa55ca5e3f820535dfd1aadcb2060e156a8770"
+    }
+  },
+  "historicalEvidence": {
+    "path": "docs/evidence/2026-11-14.json",
+    "usage": "Historical only: no prior PASS, optional-package load checks, metadata or upstream issue checks count toward this run."
+  },
+  "acceptance": {
+    "status": "PASS",
+    "execution": "One uninterrupted complete process of the corrected scripts/test-real.mjs; every gate executed in this run.",
+    "command": [
+      "node",
+      "scripts/test-real.mjs",
+      "<new-driver-scratch>/evidence"
+    ],
+    "started": "2026-11-15T13:23:13.616Z",
+    "finished": "2026-11-15T13:40:50.419Z",
+    "durationSeconds": 1057,
+    "exitCode": 0,
+    "signal": null,
+    "totals": {
+      "pass": 34,
+      "fail": 0,
+      "skip": 0
+    },
+    "gates": [
+      {
+        "name": "fresh exact pinned matrix and five real loaded extensions",
+        "status": "PASS"
+      },
+      {
+        "name": "actual Pi RPC startup registers all default commands",
+        "status": "PASS"
+      },
+      {
+        "name": "repeat installer has byte-identical managed trees and retained evidence",
+        "status": "PASS"
+      },
+      {
+        "name": "probe honors disabled/filter/autoload resources, excludes auto-discovered mjs and verifies enabled old commands",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier selector merges, disables, preserves timeout/rules and invokes reload",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier rejects invalid JSON, defaults timeout and preserves original on atomic-write failure",
+        "status": "PASS"
+      },
+      {
+        "name": "advisor-models renders real selectors and saves chosen Advisor with current-session Executor",
+        "status": "PASS"
+      },
+      {
+        "name": "advisor activation and ask_advisor complete through real registry and loopback HTTP",
+        "status": "PASS"
+      },
+      {
+        "name": "advisor missing-credential error makes no HTTP request",
+        "status": "PASS"
+      },
+      {
+        "name": "btw command renders answer/composer, completes a tools-free side request and closes",
+        "status": "PASS"
+      },
+      {
+        "name": "real Pi package-manager lifecycle suppression proven with positive control",
+        "status": "PASS"
+      },
+      {
+        "name": "failed upgrade restores old 1.0.2 CLI, bin, all trees and real old loader commands",
+        "status": "PASS"
+      },
+      {
+        "name": "real top-level module side effects cannot contaminate original snapshot or rollback bytes",
+        "status": "PASS"
+      },
+      {
+        "name": "real old CLI offline recovery with invalid settings and unavailable package/network tools",
+        "status": "PASS"
+      },
+      {
+        "name": "real npm-to-source object migration preserves unrelated packages/config/credentials",
+        "status": "PASS"
+      },
+      {
+        "name": "failed upgrade restores current-main Pi 1.4.0 matrix and real loader commands",
+        "status": "PASS"
+      },
+      {
+        "name": "current-main 1.4.0 matrix upgrades preserving auth/models/permissions/advisor/user settings",
+        "status": "PASS"
+      },
+      {
+        "name": "permission-modes 2.7.0 resolved-baseUrl regression reproduced",
+        "status": "PASS"
+      },
+      {
+        "name": "2.8.0 real registry custom-baseUrl allow",
+        "status": "PASS"
+      },
+      {
+        "name": "2.8.0 real registry custom-baseUrl deny",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier malformed fails closed without SDK retries",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier empty fails closed without SDK retries",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier timeout fails closed without SDK retries",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier http-error fails closed without SDK retries",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate allow and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate deny and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate malformed and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate empty and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate timeout and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real loaded Auto gate http-error and bounded attempts",
+        "status": "PASS"
+      },
+      {
+        "name": "real ask dangerous Bash/PowerShell/embedded/outside-cwd write gates",
+        "status": "PASS"
+      },
+      {
+        "name": "real plan dangerous Bash/PowerShell/embedded/outside-cwd write gates",
+        "status": "PASS"
+      },
+      {
+        "name": "real auto dangerous Bash/PowerShell/embedded/outside-cwd write gates",
+        "status": "PASS"
+      },
+      {
+        "name": "Ask read-only action remains available",
+        "status": "PASS"
+      }
+    ],
+    "rpcCommands": [
+      {
+        "name": "classifier-model",
+        "source": "extension"
+      },
+      {
+        "name": "btw",
+        "source": "extension"
+      },
+      {
+        "name": "advisor-manual",
+        "source": "extension"
+      },
+      {
+        "name": "advisor",
+        "source": "extension"
+      },
+      {
+        "name": "advisor-models",
+        "source": "extension"
+      },
+      {
+        "name": "advisor-stats",
+        "source": "extension"
+      },
+      {
+        "name": "advisor-settings",
+        "source": "extension"
+      },
+      {
+        "name": "advisor-off",
+        "source": "extension"
+      },
+      {
+        "name": "ask",
+        "source": "extension"
+      },
+      {
+        "name": "plan",
+        "source": "extension"
+      },
+      {
+        "name": "auto",
+        "source": "extension"
+      },
+      {
+        "name": "bypass",
+        "source": "extension"
+      },
+      {
+        "name": "permissions",
+        "source": "extension"
+      },
+      {
+        "name": "mode",
+        "source": "extension"
+      },
+      {
+        "name": "plan-execute",
+        "source": "extension"
+      },
+      {
+        "name": "model-profile",
+        "source": "extension"
+      },
+      {
+        "name": "outside-writes",
+        "source": "extension"
+      },
+      {
+        "name": "undo-outside-writes",
+        "source": "extension"
+      },
+      {
+        "name": "llama",
+        "source": "extension"
+      },
+      {
+        "name": "mcp",
+        "source": "extension"
+      }
+    ],
+    "scratchRoots": [
+      "/private/var/folders/zb/w6yyqgp13zz15cw8d8ygg_dh0000gn/T/pi-independent-final-driver-MPe5CJ/tmp/pi-independent-real-clean-X31wzB",
+      "/private/var/folders/zb/w6yyqgp13zz15cw8d8ygg_dh0000gn/T/pi-independent-final-driver-MPe5CJ/tmp/pi-independent-real-upgrade-B9HUf1",
+      "/private/var/folders/zb/w6yyqgp13zz15cw8d8ygg_dh0000gn/T/pi-independent-final-driver-MPe5CJ/tmp/pi-independent-real-previous-AqOEuE"
+    ]
+  },
+  "offline": {
+    "status": "PASS",
+    "command": [
+      "node",
+      "--test",
+      "--test-reporter=tap",
+      "scripts/test-offline.mjs"
+    ],
+    "started": "2026-11-15T13:08:34.107Z",
+    "finished": "2026-11-15T13:08:56.372Z",
+    "durationSeconds": 22,
+    "exitCode": 0,
+    "signal": null,
+    "totals": {
+      "tests": 78,
+      "pass": 78,
+      "fail": 0,
+      "cancelled": 0,
+      "skip": 0,
+      "todo": 0
+    }
+  },
+  "shellcheck": {
+    "status": "PASS",
+    "version": "0.11.0",
+    "command": "shellcheck install.sh scripts/*.sh",
+    "files": [
+      "install.sh",
+      "scripts/check-embedded-extension.sh",
+      "scripts/test-tmux.sh"
+    ],
+    "exitCode": 0,
+    "diagnostics": 0,
+    "exclusions": [],
+    "provenance": {
+      "repository": "koalaman/shellcheck",
+      "tag": "v0.11.0",
+      "asset": "shellcheck-v0.11.0.darwin.aarch64.tar.xz",
+      "url": "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.darwin.aarch64.tar.xz",
+      "expectedDigest": "sha256:56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79",
+      "actualDigest": "sha256:56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79",
+      "verified": true
+    },
+    "installation": "Extracted to private temporary directory only; no host installation or global configuration changes."
+  },
+  "staticChecks": [
+    {
+      "name": "installer-sync",
+      "command": [
+        "node",
+        "scripts/build-installer.mjs",
+        "--check"
+      ],
+      "started": "2026-11-15T13:04:33.264Z",
+      "finished": "2026-11-15T13:04:33.296Z",
+      "exitCode": 0,
+      "signal": null,
+      "status": "PASS",
+      "outputSha256": "0b8b5906c7d58908f1f567c59d3720f8b76d09752abb7785dd86b7860cc15de4"
+    },
+    {
+      "name": "embedded-extension-sync",
+      "command": [
+        "/bin/bash",
+        "scripts/check-embedded-extension.sh"
+      ],
+      "started": "2026-11-15T13:04:33.296Z",
+      "finished": "2026-11-15T13:04:33.914Z",
+      "exitCode": 0,
+      "signal": null,
+      "status": "PASS",
+      "outputSha256": "0b8b5906c7d58908f1f567c59d3720f8b76d09752abb7785dd86b7860cc15de4"
+    },
+    {
+      "name": "syntax-install.sh",
+      "command": [
+        "/bin/bash",
+        "-n",
+        "install.sh"
+      ],
+      "started": "2026-11-15T13:04:33.914Z",
+      "finished": "2026-11-15T13:04:33.919Z",
+      "exitCode": 0,
+      "signal": null,
+      "status": "PASS",
+      "outputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "syntax-scripts-check-embedded-extension.sh",
+      "command": [
+        "/bin/bash",
+        "-n",
+        "scripts/check-embedded-extension.sh"
+      ],
+      "started": "2026-11-15T13:04:33.919Z",
+      "finished": "2026-11-15T13:04:33.924Z",
+      "exitCode": 0,
+      "signal": null,
+      "status": "PASS",
+      "outputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "syntax-scripts-test-tmux.sh",
+      "command": [
+        "/bin/bash",
+        "-n",
+        "scripts/test-tmux.sh"
+      ],
+      "started": "2026-11-15T13:04:33.924Z",
+      "finished": "2026-11-15T13:04:33.929Z",
+      "exitCode": 0,
+      "signal": null,
+      "status": "PASS",
+      "outputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "isolation": {
+    "outerDriverScratch": "/private/var/folders/zb/w6yyqgp13zz15cw8d8ygg_dh0000gn/T/pi-independent-final-driver-MPe5CJ",
+    "offlineDriverScratch": "/private/var/folders/zb/w6yyqgp13zz15cw8d8ygg_dh0000gn/T/pi-independent-final-offline-driver-czTZBq",
+    "realInstallRoots": [
+      "/private/var/folders/zb/w6yyqgp13zz15cw8d8ygg_dh0000gn/T/pi-independent-final-driver-MPe5CJ/tmp/pi-independent-real-clean-X31wzB",
+      "/private/var/folders/zb/w6yyqgp13zz15cw8d8ygg_dh0000gn/T/pi-independent-final-driver-MPe5CJ/tmp/pi-independent-real-upgrade-B9HUf1",
+      "/private/var/folders/zb/w6yyqgp13zz15cw8d8ygg_dh0000gn/T/pi-independent-final-driver-MPe5CJ/tmp/pi-independent-real-previous-AqOEuE"
+    ],
+    "validated": true,
+    "environment": "Allowlisted tool PATH; separate HOME, TMPDIR, npm prefix/cache/userconfig/globalconfig (both cases), Pi directory, tmux file, XDG paths; git system/global config disabled; no inherited credentials, NODE_OPTIONS, NODE_PATH or host package configuration.",
+    "guard": "verifyScratch/verifyScratchEnvironment validate physical paths, private receipt and wrappers plus effective npm prefix/root/cache/config paths before real operations.",
+    "hostProtection": "No real installation, upgrade, rollback or restoration ran against host HOME, npm global directories, Pi configuration, credentials or historical backups."
+  },
+  "priorIntegratedFailure": {
+    "status": "FAIL",
+    "started": "2026-11-15T13:08:22.936Z",
+    "finished": "2026-11-15T13:16:25.735Z",
+    "exitCode": 1,
+    "completedPassGates": 11,
+    "stopFailures": 1,
+    "failedRequiredGate": "failed upgrade restores old 1.0.2 CLI, bin, all trees and real old loader commands",
+    "notReachedRequiredGates": 22,
+    "gates": [
+      {
+        "name": "fresh exact pinned matrix and five real loaded extensions",
+        "status": "PASS"
+      },
+      {
+        "name": "actual Pi RPC startup registers all default commands",
+        "status": "PASS"
+      },
+      {
+        "name": "repeat installer has byte-identical managed trees and retained evidence",
+        "status": "PASS"
+      },
+      {
+        "name": "probe honors disabled/filter/autoload resources, excludes auto-discovered mjs and verifies enabled old commands",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier selector merges, disables, preserves timeout/rules and invokes reload",
+        "status": "PASS"
+      },
+      {
+        "name": "classifier rejects invalid JSON, defaults timeout and preserves original on atomic-write failure",
+        "status": "PASS"
+      },
+      {
+        "name": "advisor-models renders real selectors and saves chosen Advisor with current-session Executor",
+        "status": "PASS"
+      },
+      {
+        "name": "advisor activation and ask_advisor complete through real registry and loopback HTTP",
+        "status": "PASS"
+      },
+      {
+        "name": "advisor missing-credential error makes no HTTP request",
+        "status": "PASS"
+      },
+      {
+        "name": "btw command renders answer/composer, completes a tools-free side request and closes",
+        "status": "PASS"
+      },
+      {
+        "name": "real Pi package-manager lifecycle suppression proven with positive control",
+        "status": "PASS"
+      },
+      {
+        "name": "acceptance stopped",
+        "status": "FAIL",
+        "error": "Expected after:cli injection was not reached because npm hit the production 180-second timeout."
+      }
+    ],
+    "cause": "npm global CLI replacement reached the unchanged production 180-second subprocess timeout while dependency metadata requests were outstanding; the expected after:cli injection was not reached.",
+    "recovery": "The transaction restored and real-loader-verified Pi 1.0.2. Subsequent isolated registry probes returned HTTP 200; affected replay completed the same npm installation and expected injection, then proved byte-identical managed inventories and loader commands. Exact remote cause of the transient stall is not established.",
+    "affectedReplay": {
+      "started": "2026-11-15T13:19:05.264Z",
+      "finished": "2026-11-15T13:22:42.730Z",
+      "root": "/private/var/folders/zb/w6yyqgp13zz15cw8d8ygg_dh0000gn/T/pi-independent-final-driver-6k9m7V/tmp/pi-independent-real-upgrade-vqz6PB",
+      "code": 1,
+      "signal": null,
+      "expectedInjection": true,
+      "rollbackVersion": "1.0.2",
+      "status": "PASS",
+      "inventoryAndLoaderIdentical": true
+    },
+    "changes": "No timeout, assertion, production code, version or pin was changed to bypass this failure.",
+    "countedTowardFinal": false,
+    "resultsSha256": "956539835381b466e61199cc209ccd675f8cbb0e7253ec1730e7db0eaa7b72f7",
+    "logSha256": "2c70ad17f5fdcc4312e66d69f1c344ad02e2ec93b366b4663471aa5a006cd573",
+    "failedUpgradeLogSha256": "f8de2b95860150ceaf5e3b77122beeb9f0dd599a432f41882a6d6d1c5f639493",
+    "replayLogSha256": "b5b45b7e0fd3b9247afca693f5f873b3bbaf912a971ff86da9e04698fe037c37"
+  },
+  "preliminaryAttempts": [
+    {
+      "at": "2026-11-15T13:08:49.797Z",
+      "reason": "Integrated runner omitted the historical RPC gate (33 rather than 34). Preliminary execution intentionally stopped between child operations; corrected final runner starts from new empty scratch.",
+      "gatesCompleted": 12,
+      "activeChildren": 0,
+      "status": "INTENTIONALLY_STOPPED",
+      "countedTowardFinal": false,
+      "resolution": "Added the omitted real RPC startup gate, verified it in a separate scratch, then ran the corrected complete 34-gate process from another empty scratch."
+    },
+    {
+      "status": "HARNESS_ERROR",
+      "scope": "Temporary static-check runner only",
+      "cause": "Its isolated PATH omitted dirname, needed by check-embedded-extension.sh.",
+      "resolution": "Added a wrapper for /usr/bin/dirname only in that temporary scratch and repeated every static check successfully; no repository assertion or environment guard changed."
+    }
+  ],
+  "artifacts": {
+    "sources": {
+      "install.sh": "bdc4648e134422560d41ba0a3b00af739a69e058c1090bb50e4803fcdb26d815",
+      "scripts/pins.mjs": "d1614ff33b23d82cce2cbd67b55365e53f054d4da861ab5269127e8a038e9bba",
+      "scripts/bootstrap.mjs": "9bd2544a8caedd31d77a69dede6ddacb56e147468825e47dadb41b604cbfba1c",
+      "scripts/test-real.mjs": "60068fc9e3aeecc13e64834129a65310e8d562d7dae0516cad71e24a497c1d87",
+      "scripts/real-fixture.mjs": "7e358baaa8206adac06a7e42dd91dd775fa2361296623443ccdfb7c62c57151f",
+      "scripts/test-offline.mjs": "6336fe7ab94adba2d37caf3d1cd465fe2c41f9b83f08bbf244c4ab53bfaecb1a",
+      "scripts/test-fixture-isolation.mjs": "ad114a98e4a90dff7f6945e96be389507f666e8f2d4b03998e8862fef9d5df19",
+      "scripts/test-support.mjs": "4d146863a2315c0437f5cfcdd2ad12e3ede3443977a0c012a800771517f1e9cf",
+      "scripts/test-commands.mjs": "d90773dec71e12ea5a46a55091c71b4b0f4b06dc2be200f4600c872f52a92808",
+      "scripts/test-classifier.mjs": "e364d4a66accf1d7201c8f9a949bce070fa7d89815056814e566434289159cee"
+    },
+    "realResultsSha256": "ab67cf2bccf075a15ec94f5d83bea11388d47a68cb5ccde0f1056c3415754bfc",
+    "realLogSha256": "b934538c1c0e8c585118997713f3bfdd3093f29e72e66ee4de2d3cd273be841f",
+    "offlineTapSha256": "b731342c51e879576bc5667d5eec7a64c85d7168655c9fb222a5287410239f96",
+    "shellcheckOutputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rpcCommandsSha256": "12694a42c09b9e415f6fda77fb8b8437fa1bd899c8e37ace4c4d6731c4880947",
+    "classifierLogSha256": "2008c4a0018e3f6655aa0cdb55f5730470c3db5eaf80e471620844068956ce5a",
+    "commandsLogSha256": "f29802159796cc2d4f20983d68f6146bedddfa817db5ce27312b15297e818e14",
+    "rawArtifacts": "Local private scratch only; raw logs, request traces, installed packages and backups are not committed."
+  },
+  "limits": [
+    "No real provider credentials or external inference requests",
+    "Controlled UI renders real components; fullscreen handoff bypassed",
+    "No physical terminal/tmux/mouse/split-pane certification",
+    "Optional package functionality, virtual Advisor routing and header-only auth not exercised",
+    "Historical upstream unit-test/typecheck results not rerun",
+    "Upstream transitive dependency ranges remain floating; no versions or pins were changed in this follow-up.",
+    "Optional packages and upstream metadata/issue states were not revalidated in this final acceptance."
+  ]
+}

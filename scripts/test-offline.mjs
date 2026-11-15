@@ -26,7 +26,7 @@ function fixture() {
 const snapshot = c => Object.fromEntries(Object.entries(c.slots).map(([slot, p]) => [slot, inventory(p, slot === 'bin', c)]));
 function loaderFixture() {
   // This small loader is an offline test double. The full real matrix repeats
-  // the same mutation/failure assertions with actual Pi 1.0.2 and 1.4.0.
+  // the same mutation/failure assertions with Pi 1.0.2, 1.4.0 and the candidate.
   const s = verifyScratch(scratch('probe-effects')), c = context(s.env);
   put(path.join(c.cli, 'package.json'), JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '1.0.2', type: 'module', bin: { pi: 'dist/cli.js' } }));
   put(path.join(c.cli, 'dist/cli.js'), "console.log(JSON.parse((await import('node:fs')).readFileSync(new URL('../package.json',import.meta.url))).version);\n");
@@ -64,7 +64,7 @@ test('failed upgrade restores original pre-probe bytes despite module initializa
     if (cmd === 'npm' && args[0] === 'root') return path.join(c.prefix, 'lib/node_modules');
     if (cmd === 'npm' && args[0] === 'install') {
       const file = path.join(c.cli, 'package.json'), pkg = JSON.parse(fs.readFileSync(file));
-      pkg.version = '1.4.0'; put(file, JSON.stringify(pkg)); put(c.slots.keybindings, 'upgrade damage'); return '';
+      pkg.version = PINS.pi; put(file, JSON.stringify(pkg)); put(c.slots.keybindings, 'upgrade damage'); return '';
     }
     tx.runner = undefined;
     try { return await tx.run(cmd, args, options); } finally { tx.runner = runner; }
@@ -275,10 +275,10 @@ test('tmux 3.1/3.2/3.3a/3.4/3.5/3.5a/3.6 migration and idempotence', () => {
   }
 });
 test('exact frozen pin matrix and 69-file manifest', () => {
-  assert.equal(PINS.pi, '1.4.0'); assert.equal(PINS.btw, '0.62.0'); assert.equal(PINS.advisor, '0.14.2'); assert.equal(PINS.pmVersion, '2.8.0');
+  assert.equal(PINS.pi, '1.5.2'); assert.equal(PINS.btw, '0.63.8'); assert.equal(PINS.advisor, '0.15.1'); assert.equal(PINS.pmVersion, '2.8.0');
   assert.equal(PINS.pmCommit, 'cf77816f28e102409dddbf8e537e4cf57aa092f0'); assert.equal(PINS.pmTree, '480649739171c272f355850cf6b6228ffa823c0c'); assert.equal(Object.keys(PINS.pmManifest).length, 69);
   for (const value of Object.values(PINS.pmManifest)) assert.match(value, /^[0-9a-f]{64}$/);
-  assert.ok(PINS.minimalUrl.includes('/v1.4.0/')); assert.equal(PINS.minimalSha256, '040cbc7619b2e903888c8626e2fa55ca5e3f820535dfd1aadcb2060e156a8770');
+  assert.ok(PINS.minimalUrl.includes('/v1.5.2/')); assert.equal(PINS.minimalSha256, '040cbc7619b2e903888c8626e2fa55ca5e3f820535dfd1aadcb2060e156a8770');
 });
 test('pi remove failure stops upgrade and restores every managed slot', async () => {
   const { c, tx, s } = fixture(); tx.unlock();
@@ -290,7 +290,7 @@ test('pi remove failure stops upgrade and restores every managed slot', async ()
     if (cmd === 'npm' && args[0] === 'prefix') return c.prefix;
     if (cmd === 'npm' && args[0] === 'root') return path.join(c.prefix, 'lib/node_modules');
     if (cmd === 'npm' && args[0] === 'install') {
-      put(path.join(c.cli, 'package.json'), JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '1.4.0', bin: { pi: 'dist/cli.js' } }));
+      put(path.join(c.cli, 'package.json'), JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: PINS.pi, bin: { pi: 'dist/cli.js' } }));
       put(path.join(c.cli, 'dist/cli.js'), 'new broken cli');
       fs.symlinkSync('../lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js', c.bin); return '';
     }

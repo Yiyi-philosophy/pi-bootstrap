@@ -18,7 +18,7 @@ const put = (p, value) => { fs.mkdirSync(path.dirname(p), { recursive: true }); 
 const snapshot = c => Object.fromEntries(Object.entries(c.slots).map(([slot, p]) => [slot, inventory(p, slot === 'bin', c)]));
 function fresh(label) { const s = verifyScratch(scratch(label)); report.scratch.push(s.root); save(); return s; }
 function installer(s) {
-  verifyScratch(s); const out = command(s, '/bin/bash', [path.join(repo, 'install.sh')]); console.log(out);
+  verifyScratch(s); const out = command(s, '/bin/bash', [path.join(repo, 'install.sh')], { timeout: 600000 }); console.log(out);
   fs.writeFileSync(path.join(evidence, path.basename(s.root) + '-install.log'), out + '\n');
 }
 function cli(s, ...args) {
@@ -42,11 +42,22 @@ try {
   installer(clean); await exact(c); assert.equal(probe(clean).version, PINS.pi);
   for (const name of ['auth.json', 'models.json', 'permission-modes.json', 'advisor.json']) assert.equal(fs.existsSync(path.join(c.agent, name)), false);
   pass('fresh exact pinned matrix and five real loaded extensions');
+  const rpcCommands = JSON.parse(command(clean, process.execPath, [path.join(repo, 'scripts/real-fixture.mjs'), 'rpc']));
+  for (const name of ['classifier-model', 'mode', 'btw', 'advisor', 'advisor-models', 'advisor-settings', 'advisor-stats']) {
+    assert.ok(rpcCommands.some(command => command.name === name && command.source === 'extension'), 'missing real RPC extension command: ' + name);
+  }
+  fs.writeFileSync(path.join(evidence, 'rpc-commands.json'), JSON.stringify(rpcCommands, null, 2) + '\n');
+  pass('actual Pi RPC startup registers all default commands');
   const initial = snapshot(c), stateBefore = inventory(c.state);
   installer(clean); assert.deepEqual(snapshot(c), initial); assert.deepEqual(inventory(c.state), stateBefore);
   pass('repeat installer has byte-identical managed trees and retained evidence');
   probeAcceptance(clean);
   pass('probe honors disabled/filter/autoload resources, excludes auto-discovered mjs and verifies enabled old commands');
+
+  const commandsOutput = command(clean, process.execPath, [path.join(repo, 'scripts/test-commands.mjs')]);
+  fs.writeFileSync(path.join(evidence, 'commands.log'), commandsOutput + '\n');
+  for (const line of commandsOutput.split('\n')) if (line.startsWith('PASS ')) pass(line.slice(5));
+  fs.copyFileSync(path.join(c.home, 'test-evidence/command-requests.json'), path.join(evidence, 'command-requests.json'));
 
   const source = path.join(clean.root, 'lifecycle-source'); fs.mkdirSync(source);
   put(path.join(source, 'package.json'), JSON.stringify({ name: 'scratch-lifecycle', version: '1.0.0', scripts: { postinstall: 'node marker.cjs', prepare: 'node marker.cjs' } }));
@@ -60,7 +71,9 @@ try {
   // Restore an actually working older CLI and old extensions after replacing it.
   const upgrade = fresh('real-upgrade'), u = context(upgrade.env);
   verifyScratch(upgrade);
-  command(upgrade, 'npm', ['install', '-g', '--ignore-scripts', '--no-audit', '--no-fund', '@earendil-works/pi-coding-agent@1.0.2']);
+  // Reconstruct the old stack before 1.0.3: 1.0.2's internal ^1.0.2 ranges
+  // otherwise resolve to today's Pi internals, which are not an old runtime.
+  command(upgrade, 'npm', ['install', '-g', '--ignore-scripts', '--no-audit', '--no-fund', '--before=2026-10-05T00:00:00Z', '@earendil-works/pi-coding-agent@1.0.2']);
   for (const spec of ['npm:@georgedong32/permission-modes@2.7.0', 'npm:@narumitw/pi-btw@0.61.1', 'npm:pi-advisor-flow@0.11.0']) cli(upgrade, 'install', spec);
   const cfg = JSON.parse(fs.readFileSync(u.slots.settings));
   cfg.packages[0] = { source: cfg.packages[0], extensions: ['index.ts'] };
@@ -74,7 +87,7 @@ try {
   const originalBindings = fs.readFileSync(u.slots.keybindings), originalSettings = fs.readFileSync(u.slots.settings);
   const oldProbe = probe(upgrade); assert.equal(oldProbe.version, '1.0.2'); assert.ok(oldProbe.commands.includes('old-fixture'));
   assert.deepEqual(snapshot(u), before);
-  const failed = spawnSync(process.execPath, [path.join(repo, 'scripts/real-fixture.mjs'), 'fail-upgrade'], { env: upgrade.env, cwd: upgrade.cwd, encoding: 'utf8', timeout: 240000, maxBuffer: 16 * 1024 * 1024 });
+  const failed = spawnSync(process.execPath, [path.join(repo, 'scripts/real-fixture.mjs'), 'fail-upgrade'], { env: upgrade.env, cwd: upgrade.cwd, encoding: 'utf8', timeout: 600000, maxBuffer: 16 * 1024 * 1024 });
   fs.writeFileSync(path.join(evidence, 'failed-upgrade.log'), failed.stdout + failed.stderr);
   assert.equal(failed.status, 1); assert.match(failed.stderr, /failed upgrade after real CLI replacement/);
   assert.deepEqual(snapshot(u), before); assert.deepEqual(probe(upgrade), oldProbe);
@@ -104,6 +117,35 @@ try {
   for (const [name, bytes] of Object.entries(immutable)) assert.equal(fs.readFileSync(path.join(u.agent, name), 'utf8'), bytes);
   assert.ok(probe(upgrade).commands.includes('old-fixture'));
   pass('real npm-to-source object migration preserves unrelated packages/config/credentials');
+
+  // Current main's exact default stack is a separate upgrade/rollback baseline.
+  const previous = fresh('real-previous'), p = context(previous.env);
+  command(previous, 'npm', ['install', '-g', '--ignore-scripts', '--no-audit', '--no-fund', '@earendil-works/pi-coding-agent@1.4.0']);
+  for (const spec of ['npm:@narumitw/pi-btw@0.62.0', 'npm:pi-advisor-flow@0.14.2']) cli(previous, 'install', spec);
+  fs.cpSync(c.slots.git, p.slots.git, { recursive: true });
+  fs.cpSync(c.slots.extensions, p.slots.extensions, { recursive: true });
+  const previousSettings = JSON.parse(fs.readFileSync(p.slots.settings));
+  previousSettings.packages.push('git:github.com/GeorgeDong32/pi-permission-modes@' + PINS.pmCommit);
+  previousSettings.userSetting = { keep: true };
+  put(p.slots.settings, JSON.stringify(previousSettings) + '\n');
+  const preserved = {
+    'auth.json': { fixture: { type: 'api_key', key: 'scratch-only' } },
+    'models.json': { providers: {} },
+    'permission-modes.json': { classifier: { enabled: false, model: 'fixture/user', timeoutMs: 4321 }, permissions: { deny: ['Bash(rm *)'] } },
+    'advisor.json': { advisor: 'fixture/user', executor: '', custom: 'keep' },
+  };
+  for (const [name, value] of Object.entries(preserved)) put(path.join(p.agent, name), JSON.stringify(value) + '\n');
+  const previousProbe = probe(previous), previousSnapshot = snapshot(p);
+  assert.equal(previousProbe.version, '1.4.0');
+  const previousFailure = spawnSync(process.execPath, [path.join(repo, 'scripts/real-fixture.mjs'), 'fail-upgrade'], { env: previous.env, cwd: previous.cwd, encoding: 'utf8', timeout: 600000, maxBuffer: 16 * 1024 * 1024 });
+  fs.writeFileSync(path.join(evidence, 'failed-previous-upgrade.log'), previousFailure.stdout + previousFailure.stderr);
+  assert.equal(previousFailure.status, 1); assert.match(previousFailure.stderr, /failed upgrade after real CLI replacement/);
+  assert.deepEqual(snapshot(p), previousSnapshot); assert.deepEqual(probe(previous), previousProbe);
+  pass('failed upgrade restores current-main Pi 1.4.0 matrix and real loader commands');
+  installer(previous); await exact(p);
+  for (const [name, value] of Object.entries(preserved)) assert.equal(fs.readFileSync(path.join(p.agent, name), 'utf8'), JSON.stringify(value) + '\n');
+  assert.deepEqual(JSON.parse(fs.readFileSync(p.slots.settings)).userSetting, { keep: true });
+  pass('current-main 1.4.0 matrix upgrades preserving auth/models/permissions/advisor/user settings');
 
   command(clean, 'npm', ['pack', '--ignore-scripts', '--silent', '@georgedong32/permission-modes@2.7.0', '--pack-destination', clean.root]);
   const oldPM = path.join(clean.root, 'old-pm'); fs.mkdirSync(oldPM);
