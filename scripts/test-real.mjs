@@ -42,6 +42,12 @@ try {
   installer(clean); await exact(c); assert.equal(probe(clean).version, PINS.pi);
   for (const name of ['auth.json', 'models.json', 'permission-modes.json', 'advisor.json']) assert.equal(fs.existsSync(path.join(c.agent, name)), false);
   pass('fresh exact pinned matrix and five real loaded extensions');
+  const rpcCommands = JSON.parse(command(clean, process.execPath, [path.join(repo, 'scripts/real-fixture.mjs'), 'rpc']));
+  for (const name of ['classifier-model', 'mode', 'btw', 'advisor', 'advisor-models', 'advisor-settings', 'advisor-stats']) {
+    assert.ok(rpcCommands.some(command => command.name === name && command.source === 'extension'), 'missing real RPC extension command: ' + name);
+  }
+  fs.writeFileSync(path.join(evidence, 'rpc-commands.json'), JSON.stringify(rpcCommands, null, 2) + '\n');
+  pass('actual Pi RPC startup registers all default commands');
   const initial = snapshot(c), stateBefore = inventory(c.state);
   installer(clean); assert.deepEqual(snapshot(c), initial); assert.deepEqual(inventory(c.state), stateBefore);
   pass('repeat installer has byte-identical managed trees and retained evidence');

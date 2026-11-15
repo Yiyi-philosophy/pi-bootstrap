@@ -1,6 +1,8 @@
 # Tested versions
 
-Current verification: **2026-11-14**, America/Los_Angeles, Node **24.22.1** / npm **11.19.1**. See [`docs/upgrade-audit-2026-11.md`](docs/upgrade-audit-2026-11.md) for sources, acceptance results, and limits.
+Current verification: **2026-11-15**, America/Los_Angeles, Node **24.22.1** / npm **11.19.1**. See [`docs/upgrade-audit-2026-11.md`](docs/upgrade-audit-2026-11.md) for sources, acceptance results, and limits.
+
+Final November 15 follow-up: **34/34 real acceptance gates in one uninterrupted integrated run**, **78/78 offline tests**, generated-installer/embedded-extension consistency, syntax for all three Shell files, and **ShellCheck 0.11.0 (zero diagnostics)** passed. All PASS/FAIL/SKIP counts and timings are in [`docs/evidence/2026-11-15.json`](docs/evidence/2026-11-15.json). The runner now includes the previously omitted real RPC startup assertion. Pins and installer bytes are unchanged. November 14 assembled acceptance, package metadata, optional load checks and upstream issue checks remain historical; none was reused as this full-run result.
 
 October evidence remains historical: [`docs/upgrade-audit-2026-10.md`](docs/upgrade-audit-2026-10.md), [`docs/upgrade-risk-review.md`](docs/upgrade-risk-review.md), and [`docs/independent-hardening-report.md`](docs/independent-hardening-report.md). Their upstream test counts, typechecks and physical TUI results were not rerun or relabeled as November results.
 

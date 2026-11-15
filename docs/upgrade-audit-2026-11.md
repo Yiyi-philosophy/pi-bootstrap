@@ -1,6 +1,8 @@
 # November 2026 upgrade audit
 
-Audit date: **2026-11-14**, America/Los_Angeles. Base: `main` at `a4fea2bcc70ca62b97b988d4efb3de0b6cc7a8ef`. Host: macOS arm64, Node **24.22.1**, npm **11.19.1**. Machine-readable results: [`evidence/2026-11-14.json`](evidence/2026-11-14.json).
+Initial audit date: **2026-11-14**, America/Los_Angeles. Base: `main` at `a4fea2bcc70ca62b97b988d4efb3de0b6cc7a8ef`. Host: macOS arm64, Node **24.22.1**, npm **11.19.1**. Machine-readable results: [`evidence/2026-11-14.json`](evidence/2026-11-14.json).
+
+Final acceptance: **2026-11-15**, America/Los_Angeles. Candidate base: `bc4cbe1d8d91752fcf006916fcda641341d87364`. This follow-up keeps every pin and the generated installer unchanged. Current machine-readable results: [`evidence/2026-11-15.json`](evidence/2026-11-15.json). Package metadata, release decisions, optional-package checks and upstream issue states below remain dated November 14.
 
 ## Accepted matrix
 
@@ -33,11 +35,33 @@ Upstream changes that may need explicit user action:
 
 ## Acceptance evidence
 
-**PASS: 34 real acceptance gates, 78 offline tests, and four separate optional-package install/load checks.**
+**Final execution PASS: 34 real gates / 0 FAIL / 0 SKIP; 78 offline tests / 0 FAIL / 0 SKIP; ShellCheck 0.11.0 PASS with zero diagnostics.**
 
-The evidence was assembled from the candidate install/repeat/probe/lifecycle/rollback/recovery run and focused runs of current-main migration, historical migration, classifier, command and RPC checks. `scripts/test-real.mjs` now integrates the same assertions for future maintenance. The expanded runner was not rerun as one process after adoption; the final generated installer is byte-identical to the tested candidate. This distinction is recorded in the JSON evidence.
+All 34 real gates ran in **one uninterrupted invocation** of the corrected `scripts/test-real.mjs`, from **2026-11-15T13:23:13.616Z** to **2026-11-15T13:40:50.419Z** (1057 seconds). No earlier or focused PASS was reused. The complete offline suite, including fixture isolation, was rerun after the fixture changes and passed all 78 tests with no cancellations or TODOs. Generated-installer consistency, embedded-extension consistency, individual syntax checks for all three Shell files, and whitespace checks passed.
 
-Verified behavior:
+The November 14 record assembled 34 gates from separate runs; that JSON remains unchanged as historical evidence. Its four optional-package install/load checks were **not rerun** in this follow-up and are not included in the current totals.
+
+### Closing the integrated-run coverage gap
+
+Inspection found that the committed runner actually integrated **33** gates: the historically recorded RPC startup check was missing. The minimal fixture change uses Pi's published `RpcClient` to start the real CLI in RPC mode, request `get_commands`, and stop the process. The integrated runner asserts that `classifier-model`, `mode`, `btw`, `advisor`, `advisor-models`, `advisor-settings` and `advisor-stats` all register as extension commands. No production installer, dependency pin, assertion or failure case was weakened.
+
+A preliminary run was intentionally stopped after 12 completed gates, with no active child operation, when this missing coverage was identified. It is not a full acceptance result. The RPC check passed independently in scratch, then the corrected complete runner started from another newly created outer scratch with empty HOME/prefix/cache/npmrc/Pi directories. Its fresh-install, historical 1.0.2 and previous-main 1.4.0 scenarios each used a separate guarded child scratch. All install, rollback and recovery operations stayed inside those roots; host HOME, npm globals, Pi configuration, credentials and historical backups were not modified.
+
+### Failed integrated attempt and recovery
+
+The first corrected integrated attempt stopped with **11 completed PASS gates and one failure**, leaving 22 further required gates unreached. During the old 1.0.2 upgrade, npm reached the unchanged production **180-second** subprocess timeout while dependency metadata requests were outstanding, before the expected `after:cli` injection. Its transaction restored the real 1.0.2 loader successfully. Subsequent scratch registry probes returned HTTP 200. Replaying the affected upgrade in the retained scratch completed npm, reached the expected injected failure, and proved complete managed-inventory and old-loader equality after rollback. The exact remote cause of the transient stall is not established.
+
+No timeout, assertion, production code or pin was changed to bypass that failure. Both the failed attempt and focused replay remain separate records; neither contributes a PASS to the final 34-gate result, which was rerun from another empty scratch. This network dependency remains a reproduction risk.
+
+### Closing the ShellCheck gap
+
+ShellCheck **0.11.0** was obtained as the official `koalaman/shellcheck` release asset `shellcheck-v0.11.0.darwin.aarch64.tar.xz`. Its SHA256, `56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79`, matched the official GitHub release API asset digest before extraction and execution. The tool was extracted to a private temporary directory and run with a scratch HOME; no host package installation or global configuration was changed. The full `shellcheck install.sh scripts/*.sh` scan covered three files with no exclusions or suppressed checks, exited 0 and emitted no diagnostics.
+
+A temporary static-check harness initially omitted `dirname` from its isolated PATH. Adding a wrapper for `/usr/bin/dirname` in that temporary scratch allowed the embedded consistency wrapper to run; all static checks were repeated successfully. This required no repository code or environment-guard change. Raw logs, request traces, downloaded tools, installed packages and backups remain only in private scratch; the committed JSON contains gate results, timings, source/output hashes and tool provenance.
+
+Validation elapsed through evidence collection: **2427 seconds**; the real-suite duration above is measured separately.
+
+### Behavior verified by the final integrated run
 
 - Fresh isolated installation pins every default component and loads all five extension modules. Repeating installation leaves managed trees and retained state byte-identical. No auth/model/permission/Advisor config is created on a fresh install.
 - Enabled-resource probing respects disabled packages, resource filters and autoload semantics, and prevents module initialization side effects from contaminating the original snapshots.
@@ -51,9 +75,9 @@ Verified behavior:
 - permission-modes 2.7.0's resolved-baseUrl bug is reproduced. The retained 2.8.0 snapshot produces allow/deny results at the correct endpoint. Malformed, empty, timeout and HTTP failures fail closed; Auto is bounded to exactly three attempts. Ask/Plan/Auto block dangerous Bash/PowerShell/embedded commands and outside-cwd writes; safe reads remain available.
 - Actual Pi RPC startup registers `/classifier-model`, `/mode`, `/btw`, `/advisor`, `/advisor-models`, `/advisor-settings` and `/advisor-stats` together.
 
-The offline suite additionally covers journal/input validation, unsupported paths and symlinks, interrupted workers, partial restoration, package-remove failure, and SIGINT/SIGTERM/SIGKILL recovery. All **78** passed again after changing pins. Shell syntax, generated-installer sync, embedded-extension sync and whitespace checks passed. `shellcheck` was unavailable and is explicitly **SKIP**.
+The offline suite additionally covers journal/input validation, unsupported paths and symlinks, interrupted workers, partial restoration, package-remove failure, and SIGINT/SIGTERM/SIGKILL recovery. All **78** passed in the final November 15 rerun. The earlier ShellCheck SKIP is retained only in the historical November 14 JSON and is superseded by the successful scan above.
 
-## Fixture corrections during this audit
+## Fixture corrections during the initial November 14 audit
 
 The first old-runtime fixture failed **before upgrade**: Pi 1.0.2's published internal `^1.0.2` dependencies resolved to current 1.5.2 packages. The mixed runtime broke the old permission extension's TypeBox alias. Installing the old CLI with npm `--before=2026-10-05T00:00:00Z` reconstructs the historical runtime without patching published files. Its loader, failure rollback, offline recovery and eventual migration passed.
 
@@ -75,13 +99,14 @@ No real credentials, external inference, live MCP service, child agent or langua
 
 ```bash
 node scripts/build-installer.mjs --check
-bash -n install.sh
+for file in install.sh scripts/*.sh; do bash -n "$file"; done
+shellcheck install.sh scripts/*.sh
 scripts/check-embedded-extension.sh
 node --test scripts/test-offline.mjs
 node scripts/test-real.mjs /absolute/scratch/evidence-directory
 ```
 
-All real operations use guarded scratch HOME/prefix/cache/npmrc/Pi/PATH environments. The test driver must be launched normally so it can create those environments; do not run it against a production Pi home.
+All real operations use guarded scratch HOME/prefix/cache/npmrc/Pi/PATH environments. The test driver creates those environments itself. This final run also launched the driver inside a fresh outer scratch, so its children and temporary probes stayed beneath that scratch. Do not run acceptance against a production Pi home.
 
 Primary sources checked:
 
